@@ -1,0 +1,658 @@
+
+---
+
+## Option 2: HTML File
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Understanding Bayesian Calibration: An Intuitive Guide</title>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --secondary-color: #3b82f6;
+            --accent-color: #10b981;
+            --warning-color: #f59e0b;
+            --danger-color: #ef4444;
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --text-color: #1e293b;
+            --text-muted: #64748b;
+            --border-color: #e2e8f0;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.7;
+            color: var(--text-color);
+            background: var(--bg-color);
+            padding: 2rem;
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            color: var(--primary-color);
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+            border-bottom: 4px solid var(--primary-color);
+            padding-bottom: 1rem;
+        }
+        
+        h2 {
+            color: var(--secondary-color);
+            font-size: 1.75rem;
+            margin-top: 2.5rem;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        h3 {
+            color: var(--text-color);
+            font-size: 1.25rem;
+            margin-top: 1.5rem;
+            margin-bottom: 0.75rem;
+        }
+        
+        p {
+            margin-bottom: 1rem;
+        }
+        
+        .card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            border: 1px solid var(--border-color);
+        }
+        
+        .card.highlight {
+            border-left: 4px solid var(--primary-color);
+        }
+        
+        .card.warning {
+            border-left: 4px solid var(--warning-color);
+            background: #fffbeb;
+        }
+        
+        .card.success {
+            border-left: 4px solid var(--accent-color);
+            background: #ecfdf5;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            background: var(--card-bg);
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+        
+        th, td {
+            padding: 0.875rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        th {
+            background: var(--primary-color);
+            color: white;
+            font-weight: 600;
+        }
+        
+        tr:hover {
+            background: #f1f5f9;
+        }
+        
+        tr:last-child td {
+            border-bottom: none;
+        }
+        
+        pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 1.25rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9rem;
+            margin: 1rem 0;
+        }
+        
+        code {
+            background: #e2e8f0;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9em;
+        }
+        
+        .emoji {
+            font-size: 1.5rem;
+        }
+        
+        .diagram {
+            background: #1e293b;
+            color: #10b981;
+            padding: 1.5rem;
+            border-radius: 8px;
+            font-family: 'Consolas', monospace;
+            white-space: pre;
+            overflow-x: auto;
+            line-height: 1.4;
+            margin: 1rem 0;
+        }
+        
+        .flex-row {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        
+        .flex-row .card {
+            flex: 1;
+            min-width: 280px;
+        }
+        
+        blockquote {
+            border-left: 4px solid var(--secondary-color);
+            padding-left: 1rem;
+            margin: 1rem 0;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+        
+        .badge.good { background: #dcfce7; color: #166534; }
+        .badge.moderate { background: #fef3c7; color: #92400e; }
+        .badge.poor { background: #fee2e2; color: #991b1b; }
+        
+        .toc {
+            background: var(--card-bg);
+            padding: 1.5rem;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+        }
+        
+        .toc h3 {
+            margin-top: 0;
+        }
+        
+        .toc ul {
+            list-style: none;
+            padding-left: 0;
+        }
+        
+        .toc li {
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .toc li:last-child {
+            border-bottom: none;
+        }
+        
+        .toc a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+        
+        .toc a:hover {
+            text-decoration: underline;
+        }
+        
+        @media (max-width: 768px) {
+            body {
+                padding: 1rem;
+            }
+            
+            h1 {
+                font-size: 1.75rem;
+            }
+            
+            h2 {
+                font-size: 1.5rem;
+            }
+            
+            .flex-row {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 Understanding Bayesian Calibration</h1>
+        <p style="font-size: 1.1rem; color: var(--text-muted);">An Intuitive Guide to Uncertainty Quantification</p>
+        
+        <div class="toc">
+            <h3>📑 Table of Contents</h3>
+            <ul>
+                <li><a href="#concepts">Key Concepts</a></li>
+                <li><a href="#fishing">Analogy 1: The Fishing Net</a></li>
+                <li><a href="#dartboard">Analogy 2: The Dartboard</a></li>
+                <li><a href="#weather">Analogy 3: The Weather Forecaster</a></li>
+                <li><a href="#curve">The Calibration Curve</a></li>
+                <li><a href="#metrics">Calibration Metrics</a></li>
+                <li><a href="#practical">Practical Implications</a></li>
+                <li><a href="#code">Code Reference</a></li>
+                <li><a href="#summary">Summary</a></li>
+            </ul>
+        </div>
+
+        <h2 id="concepts">📚 Key Concepts</h2>
+        
+        <table>
+            <thead>
+                <tr>
+                    <th>Term</th>
+                    <th>Definition</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>HDI</strong></td>
+                    <td>Highest Density Interval — the narrowest interval containing X% of the posterior predictive distribution</td>
+                </tr>
+                <tr>
+                    <td><strong>Coverage</strong></td>
+                    <td>Fraction of true values that fall within the HDI</td>
+                </tr>
+                <tr>
+                    <td><strong>Calibration</strong></td>
+                    <td>How well expected coverage matches empirical coverage</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2 id="fishing">🎣 Analogy 1: The Fishing Net</h2>
+        
+        <div class="card highlight">
+            <p>Imagine you're a fisherman trying to catch fish (true values) with nets of different sizes (HDI widths).</p>
+        </div>
+
+        <h3>The Setup</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Element</th>
+                    <th>Represents</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>🐟 Fish</td><td>True test values</td></tr>
+                <tr><td>🥅 Net size</td><td>HDI level (10%, 50%, 95%)</td></tr>
+                <tr><td>🎯 Casting the net</td><td>Making a prediction with uncertainty</td></tr>
+                <tr><td>✅ Catching a fish</td><td>True value falls inside HDI</td></tr>
+            </tbody>
+        </table>
+
+        <h3>Perfect Calibration</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Net Size</th>
+                    <th>Expected Catch Rate</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>Small net (10% HDI)</td><td>Catch 10% of fish</td></tr>
+                <tr><td>Medium net (50% HDI)</td><td>Catch 50% of fish</td></tr>
+                <tr><td>Large net (95% HDI)</td><td>Catch 95% of fish</td></tr>
+            </tbody>
+        </table>
+
+        <div class="card warning">
+            <h3>⚠️ Miscalibration = Mislabeled Nets!</h3>
+            <p><strong>Overconfident Model:</strong> Nets are <em>smaller</em> than labeled</p>
+            <p><strong>Conservative Model:</strong> Nets are <em>bigger</em> than labeled</p>
+        </div>
+
+        <h2 id="dartboard">🎯 Analogy 2: The Dartboard</h2>
+        
+        <div class="card highlight">
+            <p>Imagine throwing darts at a target with <strong>confidence circles</strong> predicting where darts will land.</p>
+        </div>
+
+        <h3>The Setup</h3>
+        <ul>
+            <li><strong>Bullseye</strong> = Predicted mean (μ)</li>
+            <li><strong>Circles around bullseye</strong> = HDI levels</li>
+            <li><strong>Where dart lands</strong> = True value</li>
+        </ul>
+
+        <div class="diagram">    ┌─────────────────────────────┐
+    │         95% circle          │  ← 95% of darts land here
+    │    ┌───────────────────┐    │
+    │    │    50% circle     │    │  ← 50% of darts land here
+    │    │   ┌───────────┐   │    │
+    │    │   │ 10% circle│   │    │  ← 10% of darts land here
+    │    │   │     ●     │   │    │  ← Bullseye (mean)
+    │    │   └───────────┘   │    │
+    │    └───────────────────┘    │
+    └─────────────────────────────┘</div>
+
+        <div class="card warning">
+            <h3>S-Curve Miscalibration</h3>
+            <p>When inner circles are too small and outer circles are too big:</p>
+            <ul>
+                <li>Model is <strong>overconfident</strong> near the center</li>
+                <li>Model is <strong>conservative</strong> at the edges</li>
+                <li>Distribution is <strong>too peaked</strong></li>
+            </ul>
+        </div>
+
+        <h2 id="weather">🌡️ Analogy 3: The Weather Forecaster</h2>
+
+        <div class="flex-row">
+            <div class="card success">
+                <h3>✅ Perfect Forecaster</h3>
+                <blockquote>"I'm 50% confident tomorrow will be 68-72°F"</blockquote>
+                <p>100 predictions → <strong>50 times</strong> temperature falls in range</p>
+            </div>
+            
+            <div class="card warning">
+                <h3>⚠️ Overconfident Forecaster</h3>
+                <blockquote>"I'm 50% confident tomorrow will be 68-72°F"</blockquote>
+                <p>100 predictions → Only <strong>32 times</strong> temperature falls in range!</p>
+            </div>
+        </div>
+
+        <div class="card highlight">
+            <p><strong>Translation:</strong> When model says "50% sure," it's really only ~32% sure.</p>
+        </div>
+
+        <h2 id="curve">📊 The Calibration Curve</h2>
+
+        <div class="diagram">Empirical Coverage
+     ↑
+1.0  │                          ●────●  ← Conservative
+     │                      ●
+     │                  ●
+0.75 │              ●
+     │          /
+     │        / ← Perfect calibration (diagonal)
+0.5  │      /
+     │    /    ●  ← Overconfident
+     │   /   ●
+0.25 │  /  ●
+     │ / ●
+     │/●
+0.0  └──────────────────────────────→ Expected Coverage
+     0    0.25   0.5   0.75   1.0</div>
+
+        <h3>Interpretation Guide</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Position</th>
+                    <th>Meaning</th>
+                    <th>Model Behavior</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Below diagonal</strong></td>
+                    <td>Under-coverage</td>
+                    <td>Overconfident (intervals too narrow)</td>
+                </tr>
+                <tr>
+                    <td><strong>On diagonal</strong></td>
+                    <td>Perfect calibration</td>
+                    <td>Well-calibrated</td>
+                </tr>
+                <tr>
+                    <td><strong>Above diagonal</strong></td>
+                    <td>Over-coverage</td>
+                    <td>Conservative (intervals too wide)</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>Common Patterns</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Pattern</th>
+                    <th>Shape</th>
+                    <th>Cause</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>S-curve</strong></td>
+                    <td>Below then above diagonal</td>
+                    <td>Distribution too peaked</td>
+                </tr>
+                <tr>
+                    <td><strong>Consistently below</strong></td>
+                    <td>Always under diagonal</td>
+                    <td>Systematically overconfident</td>
+                </tr>
+                <tr>
+                    <td><strong>Consistently above</strong></td>
+                    <td>Always above diagonal</td>
+                    <td>Systematically conservative</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2 id="metrics">📏 Calibration Metrics</h2>
+
+        <h3>Mean Calibration Error</h3>
+        <pre>calibration_error = mean(|empirical_coverage - expected_coverage|)</pre>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Calibration Error</th>
+                    <th>Quality</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>&lt; 0.05</td><td><span class="badge good">Excellent</span></td></tr>
+                <tr><td>0.05 - 0.10</td><td><span class="badge good">Good</span></td></tr>
+                <tr><td>0.10 - 0.15</td><td><span class="badge moderate">Moderate</span></td></tr>
+                <tr><td>&gt; 0.15</td><td><span class="badge poor">Poor</span></td></tr>
+            </tbody>
+        </table>
+
+        <h3>Weighted Calibration Error</h3>
+        <p>Weights mid-range intervals more heavily:</p>
+        <pre>weights = expected_coverage × (1 - expected_coverage)
+weighted_error = weighted_average(|empirical - expected|, weights)</pre>
+
+        <h2 id="practical">🎯 Practical Implications</h2>
+
+        <div class="flex-row">
+            <div class="card success">
+                <h3>High-Confidence Intervals (90-95%)</h3>
+                <p>If model is conservative (above diagonal):</p>
+                <ul>
+                    <li>✅ <strong>Safe for decision-making</strong></li>
+                    <li>Intervals are reliable</li>
+                </ul>
+            </div>
+            
+            <div class="card warning">
+                <h3>Mid-Range Intervals (40-70%)</h3>
+                <p>If model is overconfident (below diagonal):</p>
+                <ul>
+                    <li>⚠️ <strong>Be cautious</strong></li>
+                    <li>Stated confidence overstates certainty</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="card highlight">
+            <h3>💡 The Cautiously Overconfident Friend</h3>
+            <blockquote>
+                "I'm <strong>pretty sure</strong>" → Actually less sure than claimed<br>
+                "I'm <strong>very sure</strong>" → Actually even more sure than claimed
+            </blockquote>
+        </div>
+
+        <h2 id="code">💻 Code Reference</h2>
+
+        <pre>
+import arviz as az
+import numpy as np
+import matplotlib.pyplot as plt
+
+def compute_calibration(trace, y_test, hdi_levels=None):
+    """
+    Compute calibration metrics for Bayesian model predictions.
+    
+    Parameters
+    ----------
+    trace : arviz.InferenceData
+        Trace with predictions group containing y_obs
+    y_test : array-like
+        True test values
+    hdi_levels : list, optional
+        HDI levels to evaluate
+    
+    Returns
+    -------
+    dict : Calibration metrics and data
+    """
+    if hdi_levels is None:
+        hdi_levels = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99]
+    
+    y_test = np.asarray(y_test).flatten()
+    empirical_coverage = []
+    
+    for level in hdi_levels:
+        hdis = az.hdi(trace.predictions["y_obs"], hdi_prob=level)
+        lower = hdis["y_obs"].sel(hdi="lower").values
+        upper = hdis["y_obs"].sel(hdi="higher").values
+        coverage = np.mean((y_test >= lower) & (y_test <= upper))
+        empirical_coverage.append(coverage)
+    
+    empirical_coverage = np.array(empirical_coverage)
+    hdi_levels = np.array(hdi_levels)
+    
+    # Metrics
+    mean_cal_error = np.mean(np.abs(empirical_coverage - hdi_levels))
+    weights = hdi_levels * (1 - hdi_levels)
+    weighted_cal_error = np.average(
+        np.abs(empirical_coverage - hdi_levels), 
+        weights=weights
+    )
+    
+    return {
+        "hdi_levels": hdi_levels,
+        "empirical_coverage": empirical_coverage,
+        "mean_calibration_error": mean_cal_error,
+        "weighted_calibration_error": weighted_cal_error
+    }
+
+
+def plot_calibration_curve(calibration_results, title="Calibration Curve"):
+    """Plot calibration curve from results."""
+    hdi_levels = calibration_results["hdi_levels"]
+    empirical_coverage = calibration_results["empirical_coverage"]
+    
+    plt.figure(figsize=(7, 7))
+    plt.plot([0, 1], [0, 1], 'k--', label='Perfect calibration', linewidth=2)
+    plt.plot(hdi_levels, empirical_coverage, 'o-', label='Model', 
+             linewidth=2, markersize=8, color='steelblue')
+    plt.fill_between(hdi_levels, hdi_levels, empirical_coverage, 
+                     alpha=0.3, color='steelblue')
+    plt.xlabel('Expected Coverage (HDI Level)', fontsize=12)
+    plt.ylabel('Empirical Coverage', fontsize=12)
+    plt.title(title, fontsize=14)
+    plt.legend(fontsize=11)
+    plt.grid(True, alpha=0.3)
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    plt.show()
+        </pre>
+
+        <h2 id="summary">📋 Summary Table</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Concept</th>
+                    <th>Analogy</th>
+                    <th>Key Insight</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>HDI</strong></td>
+                    <td>Fishing net size</td>
+                    <td>Interval width at given confidence</td>
+                </tr>
+                <tr>
+                    <td><strong>Coverage</strong></td>
+                    <td>Fish caught</td>
+                    <td>Fraction of true values in interval</td>
+                </tr>
+                <tr>
+                    <td><strong>Overconfident</strong></td>
+                    <td>Net smaller than labeled</td>
+                    <td>Intervals too narrow</td>
+                </tr>
+                <tr>
+                    <td><strong>Conservative</strong></td>
+                    <td>Net bigger than labeled</td>
+                    <td>Intervals too wide</td>
+                </tr>
+                <tr>
+                    <td><strong>S-curve</strong></td>
+                    <td>Mislabeled nets</td>
+                    <td>Distribution too peaked</td>
+                </tr>
+                <tr>
+                    <td><strong>Calibration Error</strong></td>
+                    <td>Average mislabeling</td>
+                    <td>Overall calibration quality</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="card success" style="margin-top: 2rem;">
+            <h3>🔑 Key Takeaways</h3>
+            <ol>
+                <li><strong>Perfect calibration</strong> = X% HDI contains X% of true values</li>
+                <li><strong>Calibration curve</strong> should follow the diagonal</li>
+                <li><strong>S-curve pattern</strong> indicates distribution is too peaked</li>
+                <li><strong>High-confidence intervals</strong> (95%) are often reliable even with moderate miscalibration</li>
+                <li><strong>Mid-range intervals</strong> (50%) are most affected by miscalibration</li>
+            </ol>
+        </div>
+
+        <hr style="margin: 2rem 0; border: none; border-top: 1px solid var(--border-color);">
+        <p style="text-align: center; color: var(--text-muted);">
+            <em>Generated for understanding Bayesian model calibration and uncertainty quantification.</em>
+        </p>
+    </div>
+</body>
+</html>
