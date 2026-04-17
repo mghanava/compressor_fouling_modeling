@@ -15,3 +15,15 @@ wheels/
 
 # Editor
 .vscode/
+
+# uv
+uv.lock
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+
+# OS
+.DS_Store
