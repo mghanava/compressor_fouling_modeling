@@ -1,0 +1,71 @@
+[project]
+name = "compressor-fouling-modeling"
+version = "0.1.0"
+description = "Bayesian and ML approaches to compressor fouling modeling"
+readme = "README.md"
+requires-python = ">=3.12, <3.14"
+dependencies = [
+    "arviz-stats[xarray]>=0.7.0",
+    "arviz-plots[matplotlib,plotly]>=0.7.0",
+    "jax[cuda12]>=0.9.0",
+    "matplotlib>=3.10.0",
+    "numpy>=2.0.0",
+    "optuna>=4.6.0",
+    "pandas>=2.3.0",
+    "plotly>=6.3.0",
+    "pymc>=5.25.0",
+    "pytensor>=2.30.0",
+    "scikit-learn>=1.7.0",
+    "scipy>=1.15.0",
+    "xarray>=2025.1.0",
+    "xarray-einstats>=0.8.0",
+    "simuk>=0.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "debugpy",
+    "ipykernel>=6.30.1",
+    "pre-commit>=4.0.0",
+    "ruff>=0.13.3",
+]
+
+[tool.uv]
+
+[tool.ruff]
+exclude = [
+    ".git",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+]
+line-length = 88
+indent-width = 4
+target-version = "py313"
+show-fixes = true
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "PD",
+    "NPY",
+    "RUF",
+    "D",
+    "SIM",
+]
+ignore = ["D203", "D213"]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
