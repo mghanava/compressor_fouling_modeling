@@ -190,6 +190,8 @@ Recommended order:
 3. **`notebooks/compressor_fouling_with_uncertanity.ipynb`** — Build Bayesian models, perform model comparison, compute probabilistic CUSUM with full uncertainty quantification.
 4. **`notebooks/compressor_pressure_regimes_mixture_model.ipynb`** — Gaussian mixture model for pressure regime identification.
 
+> The notebook HTML files in `docs/` are large and may not render properly on GitHub. You can view rendered versions at **[https://mghanava.github.io/compressor_fouling_modeling/](https://mghanava.github.io/compressor_fouling_modeling/)** without cloning the repository.
+
 ### Run Tests
 
 ```bash
