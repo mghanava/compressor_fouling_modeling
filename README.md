@@ -255,8 +255,8 @@ from compressor_fouling_modeling.utility import (
 
 The models produce two key diagnostic plots:
 
-- **`results/fouling_summary.png`** — Frequentist 3-panel: actual vs predicted outlet pressure, residuals, and CUSUM with detected fouling onset.
-- **`results/fouling_summary_probabilistic.png`** — Bayesian 4-panel: CUSUM paths across posterior draws, exceedance probabilities, residuals with uncertainty bands.
+- **`results/plots/fouling_summary.png`** — Frequentist 3-panel: actual vs predicted outlet pressure, residuals, and CUSUM with detected fouling onset.
+- **`results/plots/fouling_summary_probabilistic.png`** — Bayesian 4-panel: CUSUM paths across posterior draws, exceedance probabilities, residuals with uncertainty bands.
 
 ---
 
