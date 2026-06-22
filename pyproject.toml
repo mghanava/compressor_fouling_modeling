@@ -5,67 +5,267 @@ description = "Bayesian and ML approaches to compressor fouling modeling"
 readme = "README.md"
 requires-python = ">=3.12, <3.14"
 dependencies = [
-    "arviz-stats[xarray]>=0.7.0",
-    "arviz-plots[matplotlib,plotly]>=0.7.0",
-    "jax[cuda12]>=0.9.0",
-    "matplotlib>=3.10.0",
-    "numpy>=2.0.0",
-    "optuna>=4.6.0",
-    "pandas>=2.3.0",
-    "plotly>=6.3.0",
-    "pymc>=5.25.0",
-    "pytensor>=2.30.0",
-    "scikit-learn>=1.7.0",
-    "scipy>=1.15.0",
-    "xarray>=2025.1.0",
-    "xarray-einstats>=0.8.0",
-    "simuk>=0.2.0",
+  "arviz-base",
+  "arviz-plots[matplotlib,plotly]",
+  "arviz-stats[xarray]",
+  "graphviz",
+  "jax",
+  "jaxtyping>=0.3.10",
+  "numpy",
+  "nutpie",
+  "optuna",
+  "pandas",
+  "plotly",
+  "pymc",
+  "pytensor",
+  "scikit-learn",
+  "scipy",
+  "seaborn",
 ]
 
 [dependency-groups]
 dev = [
-    "debugpy",
-    "ipykernel>=6.30.1",
-    "pre-commit>=4.0.0",
-    "ruff>=0.13.3",
+  "debugpy",
+  "ipywidgets",
+  "jupyterlab",
+  "nbstripout>=0.9.1",
+  "pre-commit",
+  "pydoclint",
+  "pytest>=9.0.3",
+  "ruff",
+  "scipy-stubs>=1.17.1.4",
+]
+cuda = ["jax[cuda12]"]
+
+[build-system]
+requires = ["uv_build>=0.11.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.basedpyright]
+pythonVersion = "3.13"
+pythonPlatform = "Linux"
+# extraPaths = ["src"]
+
+# stubs / inference
+reportMissingTypeStubs = false
+useLibraryCodeForTypes = true
+
+# the unknowns — reasonable for sci-Python
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownMemberType = false
+reportUnknownParameterType = false
+reportAny = false
+reportUnusedCallResult = "warning"
+
+# optionally tighten a few things back up
+reportPrivateUsage = "warning"
+reportUnnecessaryIsInstance = "warning"
+reportDuplicateImport = "warning"
+
+# ---------------------------------------------------------------------------
+# pydocstyle — Google convention
+# ---------------------------------------------------------------------------
+# [tool.ruff.lint.pydocstyle]
+# "google" enables D201, D202, D204, D205, D206, D207, D208, D209, D210,
+# D211, D212, D300, D301, D302, D400, D401, D402, D403, D404, D405, D406,
+# D407, D408, D409, D410, D411, D412, D413, D414, D415, D416, D417, D418,
+# D419 — i.e. the full Google-style structural subset.
+#
+# Key rules you now get for FREE with this convention that were previously
+# not enforced:
+#   D205  — 1 blank line between summary and description
+#   D400  — first line should end with a period
+#   D401  — first line should be in imperative mood
+#   D407  — missing dashed underline after section (numpy-only, now IGNORED
+#            by google convention — good, stops false positives on your code)
+#   D417  — missing argument descriptions in the docstring
+#            ↑ THIS is the rule that flags missing Args: entries.
+#            It is active under google convention.
+#
+# What "convention = google" does NOT enforce (by design):
+#   • It does not reject numpy-style sections like "Parameters\n----------".
+#     That is a pydoclint / DOC concern, not a pydocstyle concern.
+#   • It does not enforce that type annotations are absent from Args: lines.
+#     That requires DOC501-level checks or a separate linter (griffe-typingdoc).
+# convention = "google"
+[tool.pydoclint]
+style = "google"
+arg-type-hints-in-docstring = false
+check-return-types = false
+
+[tool.pytest.ini_options]
+markers = [
+  "slow: marks tests as slow (deselect with '-m not slow')",
 ]
 
-[tool.uv]
-
+# ---------------------------------------------------------------------------
+# Ruff — global settings
+# ---------------------------------------------------------------------------
 [tool.ruff]
 exclude = [
-    ".git",
-    ".ipynb_checkpoints",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".venv",
-    "__pycache__",
+  ".git",
+  ".ipynb_checkpoints",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".venv",
+  "__pycache__",
 ]
 line-length = 88
 indent-width = 4
 target-version = "py313"
 show-fixes = true
 
+# ---------------------------------------------------------------------------
+# Ruff — lint
+# ---------------------------------------------------------------------------
 [tool.ruff.lint]
+preview = true
 select = [
-    "E",
-    "W",
-    "F",
-    "I",
-    "B",
-    "C4",
-    "UP",
-    "PD",
-    "NPY",
-    "RUF",
-    "D",
-    "SIM",
+  "E",  # pycodestyle errors
+  "W",  # pycodestyle warnings
+  "F",  # pyflakes
+  "I",  # isort
+  "B",  # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "UP",  # pyupgrade
+  "PD",  # pandas-vet
+  "NPY",  # numpy-specific
+  "RUF",  # ruff-specific
+  "SIM",  # flake8-simplify
+  "PERF",  # perflint
+  "PIE",  # flake8-pie
+  "PL",  # pylint
+  "TRY",  # tryceratops
+  "ARG",  # flake8-unused-arguments
+  "PTH",  # flake8-use-pathlib
+  "RET",  # flake8-return
+  "ICN",  # import conventions
+
+  # -- Docstring rules -------------------------------------------------------
+  # D: pydocstyle structural rules.
+  # convention = "google" (set below) automatically enables the correct subset
+  # and disables rules that contradict Google style (e.g. D400, D406, D407).
+  # Explicitly ignoring the two pairs that conflict with each other is still
+  # required (D203/D211, D212/D213) because ruff surfaces them as warnings
+  # before the convention filter is applied.
+  "D",
+
+  # DOC: pydoclint — checks that docstring contents match the actual
+  # signature.  This is the layer that enforces argument presence/absence
+  # and return documentation.  D rules do NOT do this; DOC rules do.
+  # Requires ruff >= 0.9.0 (stable since 0.11).
+  "DOC",
 ]
-ignore = ["D203", "D213"]
+
+ignore = [
+  # -- D conflicts (must ignore one of each mutually exclusive pair) ---------
+  "D203",  # one-blank-line-before-class  ← conflicts with D211 (no blank line)
+  "D213",  # multi-line-summary-second-line ← conflicts with D212 (first line)
+  # D211 + D212 are the Google-style correct choices; the above two are kept
+  # in ignore so ruff never flips to the wrong variant.
+  "D407",  # dashed underline is numpy style, not google
+  # -- Noisy / overly strict D rules ----------------------------------------
+  # D100–D107 module/class/method "missing docstring" rules are all active
+  # via the google convention EXCEPT the ones below which we intentionally
+  # relax for this scientific codebase:
+  "D101",  # missing docstring in public class — many are simple data classes
+  "D105",  # missing docstring in magic method — __repr__ etc. are self-evident
+  "D106",  # missing docstring in public nested class
+
+  # -- DOC rules that are too strict for a scientific/ML codebase -----------
+  # DOC201 requires a "Returns:" section even for functions that return None
+  # or whose return is obvious (e.g. setters).  Enable if you want 100%
+  # coverage; leave ignored for pragmatic use.
+  # "DOC201",  # ← uncomment to enforce Returns: on every non-None return
+
+  # DOC501 requires "Raises:" for every raise statement, including guard
+  # clauses like `raise ValueError("x must be positive")`.  Very noisy.
+  # "DOC501",  # ← uncomment to enforce Raises: on every raise
+
+  # -- Style/noise -----------------------------------------------------------
+  "E501",  # line length — formatter handles this
+  "PLR0913",  # too many arguments — unavoidable in scientific APIs
+  "PLR2004",  # magic value comparisons — too noisy for numerical code
+  "TRY003",  # long exception messages — too noisy
+]
+
 fixable = ["ALL"]
+# Safe auto-fixes that ruff can apply without human review:
+extend-safe-fixes = [
+  "C4",  # rewrite comprehensions
+  "UP",  # modernise syntax
+  "SIM",  # simplify expressions
+  "RUF",  # ruff-specific cleanups
+  "D",  # docstring formatting fixes (whitespace, blank lines, capitalisation)
+  # NOTE: ruff will NOT rewrite Args/Returns section content — only
+  # structural/whitespace issues are auto-fixed.
+]
 unfixable = []
 
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+# ---------------------------------------------------------------------------
+# Per-file overrides
+# ---------------------------------------------------------------------------
+[tool.ruff.lint.per-file-ignores]
+"src/**/__init__.py" = [
+  "F401",  # unused imports are intentional re-exports
+  "D104",  # missing docstring in public package
+]
+"tests/**/*.py" = [
+  "D",  # tests don't need docstrings
+  "DOC",  # … nor docstring-content checks
+  "PLR2004",  # magic values are fine in assertions
+  "ARG",  # fixtures inject unused args by design
+]
+"**/conftest.py" = [
+  "D",
+  "DOC",
+]
+"*.ipynb" = [
+  "D",  # notebooks have informal conventions
+  "DOC",  # same
+  "E402",  # module-level imports not at top
+  "B018",  # useless expression — common in exploratory cells
+]
+
+# ---------------------------------------------------------------------------
+# isort
+# ---------------------------------------------------------------------------
+[tool.ruff.lint.isort]
+known-first-party = ["compressor_fouling_modeling"]
+combine-as-imports = true
+force-sort-within-sections = true
+
+# ---------------------------------------------------------------------------
+# flake8-bugbear
+# ---------------------------------------------------------------------------
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "typer.Argument"]
+
+# ---------------------------------------------------------------------------
+# pylint
+# ---------------------------------------------------------------------------
+[tool.ruff.lint.pylint]
+max-args = 8
+
+# ---------------------------------------------------------------------------
+# Ruff — formatter
+# ---------------------------------------------------------------------------
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+# Reformats code examples inside docstrings (``` blocks).
 docstring-code-format = true
+# Narrower than the main line-length so examples are readable in rendered docs.
+docstring-code-line-length = 72
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+# ---------------------------------------------------------------------------
+# uv
+# ---------------------------------------------------------------------------
+[tool.uv]
+package = true
+exclude-newer = "3 days"

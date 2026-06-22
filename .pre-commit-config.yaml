@@ -1,0 +1,13 @@
+repos:
+  - repo: https://github.com/jsh9/pydoclint
+    rev: 0.8.6
+    hooks:
+      - id: pydoclint
+        args:
+          - "--style=google"
+          - "--arg-type-hints-in-docstring=False"
+          - "--check-return-types=False"
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout
