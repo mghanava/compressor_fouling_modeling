@@ -44,8 +44,6 @@ build-backend = "uv_build"
 [tool.basedpyright]
 pythonVersion = "3.13"
 pythonPlatform = "Linux"
-# extraPaths = ["src"]
-
 # stubs / inference
 reportMissingTypeStubs = false
 useLibraryCodeForTypes = true
@@ -63,32 +61,6 @@ reportPrivateUsage = "warning"
 reportUnnecessaryIsInstance = "warning"
 reportDuplicateImport = "warning"
 
-# ---------------------------------------------------------------------------
-# pydocstyle — Google convention
-# ---------------------------------------------------------------------------
-# [tool.ruff.lint.pydocstyle]
-# "google" enables D201, D202, D204, D205, D206, D207, D208, D209, D210,
-# D211, D212, D300, D301, D302, D400, D401, D402, D403, D404, D405, D406,
-# D407, D408, D409, D410, D411, D412, D413, D414, D415, D416, D417, D418,
-# D419 — i.e. the full Google-style structural subset.
-#
-# Key rules you now get for FREE with this convention that were previously
-# not enforced:
-#   D205  — 1 blank line between summary and description
-#   D400  — first line should end with a period
-#   D401  — first line should be in imperative mood
-#   D407  — missing dashed underline after section (numpy-only, now IGNORED
-#            by google convention — good, stops false positives on your code)
-#   D417  — missing argument descriptions in the docstring
-#            ↑ THIS is the rule that flags missing Args: entries.
-#            It is active under google convention.
-#
-# What "convention = google" does NOT enforce (by design):
-#   • It does not reject numpy-style sections like "Parameters\n----------".
-#     That is a pydoclint / DOC concern, not a pydocstyle concern.
-#   • It does not enforce that type annotations are absent from Args: lines.
-#     That requires DOC501-level checks or a separate linter (griffe-typingdoc).
-# convention = "google"
 [tool.pydoclint]
 style = "google"
 arg-type-hints-in-docstring = false
@@ -242,7 +214,7 @@ force-sort-within-sections = true
 # flake8-bugbear
 # ---------------------------------------------------------------------------
 [tool.ruff.lint.flake8-bugbear]
-extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "typer.Argument"]
+extend-immutable-calls = []
 
 # ---------------------------------------------------------------------------
 # pylint
