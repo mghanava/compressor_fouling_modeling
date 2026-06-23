@@ -3763,7 +3763,7 @@ def plot_loo_calibration_curves(
 
     y_obs, y_pred, weights = _prepare_calibration_data(idata)
 
-    fig, calib_res_out_pressure = plot_loo_calibration_curve_with_reference(
+    fig, calib_res = plot_loo_calibration_curve_with_reference(
         y_obs,
         y_pred,
         weights,
@@ -3775,7 +3775,7 @@ def plot_loo_calibration_curves(
 
     plt.tight_layout()
     plt.show()
-    return fig, calib_res_out_pressure
+    return fig, calib_res
 
 
 def evaluate_noise_model(
