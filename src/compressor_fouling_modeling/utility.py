@@ -3492,10 +3492,11 @@ def _compute_calibration_curve_data(
     empirical_coverage: Float64Matrix1D = np.array(
         [(loo_pit <= q).mean() for q in expected_coverage]
     )
-
+    # finite-sample uncertainty band
     sampling_lower, sampling_upper = null_coverage_band(
         weights=weights, grid=expected_coverage, rng=rng
     )
+    # posterior uncertainty
     bootstrap_lower, bootstrap_upper = bayesian_bootstrap_band(
         loo_pit, expected_coverage, rng, ci_level=ci_level, B=n_boot
     )
