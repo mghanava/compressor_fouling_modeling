@@ -3652,7 +3652,11 @@ def plot_loo_calibration_curve_with_reference(
     _ = ax.set_xlabel("Expected Coverage (HDI Level)", fontsize=13)
     _ = ax.set_ylabel("Empirical Coverage (LOO)", fontsize=13)
     _ = ax.set_title(
-        f"LOO-Based Calibration Curve (n={d['n_obs']})", fontsize=15, fontweight="bold"
+        f"""LOO-Based Calibration Curve (n={d["n_obs"]})\n"""
+        + f"""calibration error {d["calibration_error"]:.3f}, """
+        + f"""weighted calibration error {d["weighted_cal_error"]:.3f}""",
+        fontsize=15,
+        fontweight="bold",
     )
     _ = ax.legend(fontsize=11, loc="upper left")
     _ = ax.grid(True)
