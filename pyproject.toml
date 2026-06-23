@@ -190,6 +190,7 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
   "D",  # tests don't need docstrings
   "DOC",  # … nor docstring-content checks
   "PLR2004",  # magic values are fine in assertions
+  "PLR6301",  # no-self-use: test methods don't need self
   "ARG",  # fixtures inject unused args by design
 ]
 "**/conftest.py" = [
