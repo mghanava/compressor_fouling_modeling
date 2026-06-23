@@ -68,7 +68,8 @@ check-return-types = false
 
 [tool.pytest.ini_options]
 markers = [
-  "slow: marks tests as slow (deselect with '-m not slow')",
+  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "visual: Marks tests that validate visual elements, UIs, or computer vision outputs."
 ]
 
 # ---------------------------------------------------------------------------
