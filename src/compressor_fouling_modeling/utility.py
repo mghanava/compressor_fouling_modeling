@@ -93,7 +93,7 @@ class CalibrationCurveParams(TypedDict):
     bootstrap_upper: Float64Matrix1D
     calibration_error: np.float64
     weighted_cal_error: np.float64
-    miscalibrated: Uint16Matrix1D
+    miscalibrated: BoolMatrix1D
     n_miscalibrated: np.uint16
     n_obs: int
 
@@ -3504,7 +3504,6 @@ def _compute_calibration_curve_data(
     calibration_error: np.float64 = np.mean(
         np.abs(empirical_coverage - expected_coverage), dtype=np.float64
     )
-    print(f"\nMean Calibration Error (LOO): {calibration_error:.3f}")
 
     variance_weights = expected_coverage * (1 - expected_coverage)
     weighted_cal_error: np.float64 = cast(
@@ -3513,18 +3512,13 @@ def _compute_calibration_curve_data(
             np.abs(empirical_coverage - expected_coverage), weights=variance_weights
         ),
     )
-    print(f"Weighted Calibration Error (LOO): {weighted_cal_error:.3f}")
-
-    miscalibrated: Uint16Matrix1D = (
-        ((expected_coverage < bootstrap_lower) | (expected_coverage > bootstrap_upper))
-        & ((expected_coverage < sampling_lower) | (expected_coverage > sampling_upper))
-    ).astype(np.uint16)
-    n_miscalibrated: np.uint16 = np.sum(miscalibrated)
-    print(
-        "Significantly miscalibrated intervals: "
-        + f"{n_miscalibrated} out of {len(expected_coverage)} "
-        + f"({100 * n_miscalibrated / len(expected_coverage):.1f}%)"
+    calibrated = (
+        (empirical_coverage >= expected_coverage) & (sampling_upper >= bootstrap_lower)
+    ) | (
+        (empirical_coverage <= expected_coverage) & (sampling_lower <= bootstrap_upper)
     )
+    miscalibrated = ~calibrated
+    n_miscalibrated = np.sum(miscalibrated).astype(np.uint16)
 
     n_obs: int = y_obs.size
 
@@ -3604,7 +3598,7 @@ def plot_loo_calibration_curve_with_reference(
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
-    ax.set_aspect("equal", adjustable="box")
+    ax.set_aspect("equal")
 
     _ = ax.plot(
         [0, 1], [0, 1], "k--", linewidth=2, label="Perfect calibration", alpha=0.7
@@ -3635,13 +3629,14 @@ def plot_loo_calibration_curve_with_reference(
         color="steelblue",
         zorder=10,
     )
-    # d["miscalibrated"]` is a boolean mask (0/1 per coverage level). When used
+    # d["miscalibrated"] is a boolean mask (0/1 per coverage level). When used
     # as an index, it picks only the entries where the value is truthy (1);
     # i.e., miscalibrated.
     if d["n_miscalibrated"] > 0:
+        mask = d["miscalibrated"]
         _ = ax.scatter(
-            d["expected_coverage"][d["miscalibrated"]],
-            d["empirical_coverage"][d["miscalibrated"]],
+            d["expected_coverage"][mask],
+            d["empirical_coverage"][mask],
             s=150,
             facecolors="none",
             edgecolors="red",
