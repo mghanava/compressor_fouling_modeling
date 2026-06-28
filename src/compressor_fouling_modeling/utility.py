@@ -3459,6 +3459,115 @@ class CalibrationStats:
     n_miscalibrated: np.uint16
 
 
+def _calculate_empirical_coverage(
+    loo_pit: Float64Matrix1D, expected_coverage: Float64Matrix1D
+) -> Float64Matrix1D:
+    """Compute empirical coverage at each expected-coverage threshold.
+
+    Args:
+      loo_pit: Leave-one-out probability integral transform values.
+      expected_coverage: Array of nominal coverage levels to evaluate.
+
+    Returns:
+      Array of empirical coverage proportions, one per threshold.
+
+    Example:
+      ```python
+      loo_pit = np.array([0.1, 0.4, 0.6, 0.9])
+      expected = np.array([0.25, 0.50, 0.75])
+      _calculate_empirical_coverage(loo_pit, expected)
+      ```
+
+    """
+    return np.array([(loo_pit <= q).mean() for q in expected_coverage])
+
+
+def _calculate_calibration_error(
+    expected_coverage: Float64Matrix1D, empirical_coverage: Float64Matrix1D
+):
+    """Evaluate calibration error and variance-weighted calibration error.
+
+    The weighted variant up-weights deviations where the expected coverage
+    is near 0.5 (highest variance) and down-weights the extremes.
+
+    Args:
+      expected_coverage: Nominal coverage levels.
+      empirical_coverage: Observed coverage at each level.
+
+    Returns:
+      A tuple ``(calibration_error, weighted_cal_error)``, where
+      ``calibration_error`` is the mean absolute deviation and
+      ``weighted_cal_error`` is the deviation weighted by
+      ``expected_coverage * (1 - expected_coverage)``.
+
+    Example:
+      ```python
+      expected = np.array([0.25, 0.50, 0.75])
+      empirical = np.array([0.20, 0.55, 0.70])
+      _calculate_calibration_error(expected, empirical)
+      ```
+
+    """
+    calibration_error: np.float64 = np.mean(
+        np.abs(empirical_coverage - expected_coverage), dtype=np.float64
+    )
+
+    variance_weights = expected_coverage * (1 - expected_coverage)
+    weighted_cal_error: np.float64 = cast(
+        np.float64,
+        np.average(
+            np.abs(empirical_coverage - expected_coverage), weights=variance_weights
+        ),
+    )
+    return calibration_error, weighted_cal_error
+
+
+def _calculate_miscalibrated_coverage(
+    empirical_coverage: Float64Matrix1D,
+    expected_coverage: Float64Matrix1D,
+    sampling_lower: Float64Matrix1D,
+    sampling_upper: Float64Matrix1D,
+    bootstrap_lower: Float64Matrix1D,
+    bootstrap_upper: Float64Matrix1D,
+):
+    """Identify coverage levels where calibration bands do not overlap.
+
+    A level is considered calibrated when the sampling interval and
+    bootstrap interval overlap; otherwise it is miscalibrated.
+
+    Args:
+      empirical_coverage: Observed coverage at each level.
+      expected_coverage: Nominal coverage at each level.
+      sampling_lower: Lower bound of the sampling uncertainty band.
+      sampling_upper: Upper bound of the sampling uncertainty band.
+      bootstrap_lower: Lower bound of the bootstrap uncertainty band.
+      bootstrap_upper: Upper bound of the bootstrap uncertainty band.
+
+    Returns:
+      Boolean array where ``True`` indicates a miscalibrated level.
+
+    Example:
+      ```python
+      empirical = np.array([0.20, 0.55, 0.70])
+      expected = np.array([0.25, 0.50, 0.75])
+      samp_low = np.array([0.18, 0.52, 0.67])
+      samp_high = np.array([0.22, 0.58, 0.73])
+      boot_low = np.array([0.15, 0.48, 0.65])
+      boot_high = np.array([0.26, 0.53, 0.78])
+      _calculate_miscalibrated_coverage(
+          empirical, expected, samp_low, samp_high, boot_low, boot_high
+      )
+      ```
+
+    """
+    calibrated = (
+        (empirical_coverage >= expected_coverage) & (sampling_upper >= bootstrap_lower)
+    ) | (
+        (empirical_coverage <= expected_coverage) & (sampling_lower <= bootstrap_upper)
+    )
+    return ~calibrated
+
+
 def _compute_calibration_curve_data(
     y_obs: Float64Matrix1D,
     y_pred: Float64Matrix2D,
@@ -3484,43 +3593,35 @@ def _compute_calibration_curve_data(
       ``miscalibrated``, ``n_miscalibrated``, and ``n_obs``.
 
     """
-    loo_pit: Float64Matrix1D = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
-
     expected_coverage: Float64Matrix1D = np.array(
         [*np.arange(0.05, 0.96, 0.05).tolist(), 0.99, 1.0]
     )
-    empirical_coverage: Float64Matrix1D = np.array(
-        [(loo_pit <= q).mean() for q in expected_coverage]
-    )
-    # finite-sample uncertainty band
+    # compute loo pit values
+    loo_pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
+    # calculate emprirical coverage values
+    empirical_coverage = _calculate_empirical_coverage(loo_pit, expected_coverage)
+    # compute finite-sample uncertainty band
     sampling_lower, sampling_upper = null_coverage_band(
         weights=weights, grid=expected_coverage, rng=rng
     )
-    # posterior uncertainty
+    # compute posterior uncertainty
     bootstrap_lower, bootstrap_upper = bayesian_bootstrap_band(
         loo_pit, expected_coverage, rng, ci_level=ci_level, B=n_boot
     )
-
-    calibration_error: np.float64 = np.mean(
-        np.abs(empirical_coverage - expected_coverage), dtype=np.float64
+    # calculate calibration error values
+    calibration_error, weighted_cal_error = _calculate_calibration_error(
+        expected_coverage, empirical_coverage
     )
-
-    variance_weights = expected_coverage * (1 - expected_coverage)
-    weighted_cal_error: np.float64 = cast(
-        np.float64,
-        np.average(
-            np.abs(empirical_coverage - expected_coverage), weights=variance_weights
-        ),
+    # find miscalibrated intervals
+    miscalibrated = _calculate_miscalibrated_coverage(
+        empirical_coverage,
+        expected_coverage,
+        sampling_lower,
+        sampling_upper,
+        bootstrap_lower,
+        bootstrap_upper,
     )
-    calibrated = (
-        (empirical_coverage >= expected_coverage) & (sampling_upper >= bootstrap_lower)
-    ) | (
-        (empirical_coverage <= expected_coverage) & (sampling_lower <= bootstrap_upper)
-    )
-    miscalibrated = ~calibrated
     n_miscalibrated = np.sum(miscalibrated).astype(np.uint16)
-
-    n_obs: int = y_obs.size
 
     return {
         "expected_coverage": expected_coverage,
@@ -3533,7 +3634,7 @@ def _compute_calibration_curve_data(
         "weighted_cal_error": weighted_cal_error,
         "miscalibrated": miscalibrated,
         "n_miscalibrated": n_miscalibrated,
-        "n_obs": n_obs,
+        "n_obs": y_obs.size,
     }
 
 
