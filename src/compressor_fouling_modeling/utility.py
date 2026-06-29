@@ -3853,14 +3853,21 @@ def plot_loo_calibration_curves(
 
     """
     pc = azp.plot_loo_pit(
+        idata, envelope_prob=ci_level, figure_kwargs={"figsize": (7, 4)}
+    )
+    loo_pit_img = _render_pc_to_img(pc)
+    pc = azp.plot_loo_pit(
         idata, coverage=True, envelope_prob=ci_level, figure_kwargs={"figsize": (7, 4)}
     )
-    loo_img = _render_pc_to_img(pc)
+    loo_eti_img = _render_pc_to_img(pc)
 
-    _, (ax_loo, ax_custom) = plt.subplots(1, 2, figsize=(14, 7))
+    _, (ax_loo_1, ax_loo_2, ax_custom) = plt.subplots(1, 3, figsize=(14, 7))
 
-    ax_loo.imshow(loo_img)
-    ax_loo.axis("off")
+    ax_loo_1.imshow(loo_pit_img)
+    ax_loo_1.axis("off")
+
+    ax_loo_2.imshow(loo_eti_img)
+    ax_loo_2.axis("off")
 
     y_obs, y_pred, weights = _prepare_calibration_data(idata)
 
