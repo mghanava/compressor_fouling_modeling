@@ -2809,9 +2809,7 @@ def compute_psis_weights(
     weights: Float64Matrix2D = np.exp(
         log_weights - cast(Float64Matrix2D, np.max(log_weights, axis=1, keepdims=True))
     )
-    weights /= cast(
-        Float64Matrix2D, np.sum(weights, axis=1, keepdims=True)
-    )  # (n_obs, n_samples)
+    weights /= np.sum(weights, axis=1, keepdims=True)  # (n_obs, n_samples)
 
     return weights, pareto_k
 
@@ -3251,6 +3249,8 @@ def null_coverage_band(
 
     """
     n: int = weights.shape[0]
+    # assure weights are normalized
+    weights /= np.sum(weights, axis=1, keepdims=True)
     ess = cast(Float64Matrix1D, 1.0 / np.sum(weights**2, axis=1))  # shape (n_obs,)
 
     # True PITs under null: (B, n_obs)
@@ -3441,9 +3441,11 @@ def compute_loo_pit_model_agnostic(
         uses PSIS-LOO without refitting the model.
 
     """
+    # assure weights are normalized
+    weights /= np.sum(weights, axis=1, keepdims=True)
     y_obs_reshaped = y_obs[:, np.newaxis]  # Shape (n_obs, 1)
     indicators = (y_pred_flat <= y_obs_reshaped).astype(np.uint16)
-    return cast(Float64Matrix1D, np.sum(weights * indicators, axis=1))
+    return np.clip(np.sum(weights * indicators, axis=1), 0.0, 1.0)
 
 
 @dataclass
@@ -3580,8 +3582,9 @@ def _compute_calibration_curve_data(
 
     Args:
       y_obs: Observed data vector.
-      y_pred: Posterior predictive draws ``(n_obs, n_samples)``.
-      weights: Normalized importance weights ``(n_obs, n_samples)``.
+      y_pred: Posterior predictive draws of shape (n_obs, n_samples).
+      weights: Importance sampling weights of shape (n_obs, n_samples).
+          Normalized internally.
       n_boot: Number of Bayesian bootstrap replications.
       ci_level: Credible interval level for bands.
       rng: NumPy random generator.
@@ -3691,7 +3694,6 @@ def plot_loo_calibration_curve_with_reference(
         if random_seed is not None
         else np.random.default_rng()
     )
-    weights /= cast(Float64Matrix2D, np.sum(weights, axis=1, keepdims=True))
 
     d = _compute_calibration_curve_data(y_obs, y_pred, weights, n_boot, ci_level, rng)
 
