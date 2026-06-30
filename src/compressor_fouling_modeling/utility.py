@@ -3513,7 +3513,9 @@ def _calculate_calibration_error(
     calibration_error: np.float64 = np.mean(
         np.abs(empirical_coverage - expected_coverage), dtype=np.float64
     )
-
+    # Using Bernoulli variance `p(1-p)` as weights up-weights mid-range coverage
+    # levels (near 0.5) where sampling variability is highest, and down-weights
+    # extremes.
     variance_weights = expected_coverage * (1 - expected_coverage)
     weighted_cal_error: np.float64 = cast(
         np.float64,
