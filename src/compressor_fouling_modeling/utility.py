@@ -13,6 +13,7 @@ from enum import Enum
 import io
 from itertools import groupby
 from typing import Any, Literal, TypedDict, cast
+import warnings
 
 from arviz_base import extract
 import arviz_plots as azp
@@ -2787,10 +2788,13 @@ def compute_psis_weights(
             - weights: Normalized PSIS weights with shape (n_obs, n_samples).
             - pareto_k: Pareto k values with shape (n_obs, ).
 
-    Raises:
-        AssertionError
-            If any Pareto k value is greater than 0.7, indicating potential issues
-            with LOO estimates.
+    Warns:
+        UserWarning
+            If any Pareto k value exceeds 0.7, indicating potential issues
+            with LOO estimate reliability. A hard assertion is avoided because
+            Pareto-k estimates are sensitive to MCMC sampling variability —
+            a single run can cross the 0.7 threshold randomly. Callers should
+            inspect the returned ``pareto_k`` array for their use case.
 
     """
     # Compute PSIS weights (these reweight posterior samples to approximate LOO
@@ -2799,10 +2803,15 @@ def compute_psis_weights(
     assert result is not None, "psis method has returned None."
     log_weights, pareto_k = cast(tuple[Float64Matrix2D, Float64Matrix1D], result)
 
-    assert all(pareto_k <= 0.7), (
-        "Warning: PSIS Pareto k values indicate potential issues with LOO estimates "
-        "(k > 0.7)."
-    )
+    pareto_k_max = cast(float, np.max(pareto_k))
+    if pareto_k_max > 0.7:
+        warnings.warn(
+            "PSIS Pareto k values indicate potential issues with LOO estimates: "
+            + f"max k = {pareto_k_max:.3f} (threshold = 0.7). "
+            + f"{(pareto_k > 0.7).sum()} of {len(pareto_k)} "
+            + "observations exceed the threshold.",
+            stacklevel=2,
+        )
     # log_weights shape (n_obs, n_samples) - log weights for each observation
     # pareto_k shape (n_obs, ) - pareto_k for each observation
     # Normalize weights for each observation considering numerical stability
@@ -3575,7 +3584,7 @@ def _calculate_miscalibrated_coverage(
 def _compute_calibration_curve_data(
     y_obs: Float64Matrix1D,
     y_pred: Float64Matrix2D,
-    weights: Float64Matrix2D,
+    log_likelihood: Float64Matrix2D,
     n_boot: int,
     ci_level: float,
     rng: np.random.Generator,
@@ -3585,8 +3594,7 @@ def _compute_calibration_curve_data(
     Args:
       y_obs: Observed data vector.
       y_pred: Posterior predictive draws of shape (n_obs, n_samples).
-      weights: Importance sampling weights of shape (n_obs, n_samples).
-          Normalized internally.
+      log_likelihood: Log-likelihood matrix of shape (n_obs, n_samples).
       n_boot: Number of Bayesian bootstrap replications.
       ci_level: Credible interval level for bands.
       rng: NumPy random generator.
@@ -3601,6 +3609,7 @@ def _compute_calibration_curve_data(
     expected_coverage: Float64Matrix1D = np.array(
         [*np.arange(0.05, 0.96, 0.05).tolist(), 0.99, 1.0]
     )
+    weights, _pareto_k = compute_psis_weights(log_likelihood)
     # compute loo pit values
     loo_pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
     # calculate emprirical coverage values
@@ -3646,7 +3655,7 @@ def _compute_calibration_curve_data(
 def plot_loo_calibration_curve_with_reference(
     y_obs: Float64Matrix1D,
     y_pred: Float64Matrix2D,
-    weights: Float64Matrix2D,
+    log_likelihood: Float64Matrix2D,
     n_boot: int = 10000,
     ci_level: float = 0.95,
     figsize: tuple[float, float] = (7, 7),
@@ -3665,8 +3674,7 @@ def plot_loo_calibration_curve_with_reference(
     Args:
         y_obs: Observed data vector of shape (n_obs,).
         y_pred: Posterior predictive draws of shape (n_obs, n_samples).
-        weights: Importance sampling weights of shape (n_obs, n_samples).
-            Normalized internally.
+        log_likelihood: Log-likelihood matrix of shape (n_obs, n_samples).
         n_boot: Number of Bayesian bootstrap replications. Defaults to 10000.
         ci_level: Credible interval level for the bootstrap and sampling bands.
             Defaults to 0.95.
@@ -3685,7 +3693,7 @@ def plot_loo_calibration_curve_with_reference(
         >>> fig, st = plot_loo_calibration_curve_with_reference(
         ...     y_obs=y_obs,
         ...     y_pred=y_pred,
-        ...     weights=weights,
+        ...     log_likelihood=log_likelihood,
         ...     n_boot=5000,
         ... )
         >>> print(st.calibration_error)
@@ -3697,7 +3705,9 @@ def plot_loo_calibration_curve_with_reference(
         else np.random.default_rng()
     )
 
-    d = _compute_calibration_curve_data(y_obs, y_pred, weights, n_boot, ci_level, rng)
+    d = _compute_calibration_curve_data(
+        y_obs, y_pred, log_likelihood, n_boot, ci_level, rng
+    )
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
@@ -3821,8 +3831,7 @@ def _prepare_calibration_data(
     log_lik_flat: Float64Matrix2D = extract(
         idata, group="log_likelihood", combined=True
     ).to_numpy()
-    weights, _ = compute_psis_weights(-log_lik_flat)
-    return y_obs, y_pred, weights
+    return y_obs, y_pred, log_lik_flat
 
 
 def plot_loo_calibration_curves(
@@ -3873,12 +3882,12 @@ def plot_loo_calibration_curves(
     ax_loo_2.imshow(loo_eti_img)
     ax_loo_2.axis("off")
 
-    y_obs, y_pred, weights = _prepare_calibration_data(idata)
+    y_obs, y_pred, log_lik_flat = _prepare_calibration_data(idata)
 
     fig, calib_res = plot_loo_calibration_curve_with_reference(
         y_obs,
         y_pred,
-        weights,
+        log_lik_flat,
         n_boot=n_boot,
         ci_level=ci_level,
         random_seed=random_seed,
