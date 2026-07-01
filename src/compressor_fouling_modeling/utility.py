@@ -3584,7 +3584,8 @@ def _calculate_miscalibrated_coverage(
 def _compute_calibration_curve_data(
     y_obs: Float64Matrix1D,
     y_pred: Float64Matrix2D,
-    log_likelihood: Float64Matrix2D,
+    log_likelihood: Float64Matrix2D | None,
+    weights: Float64Matrix2D | None,
     n_boot: int,
     ci_level: float,
     rng: np.random.Generator,
@@ -3595,6 +3596,7 @@ def _compute_calibration_curve_data(
       y_obs: Observed data vector.
       y_pred: Posterior predictive draws of shape (n_obs, n_samples).
       log_likelihood: Log-likelihood matrix of shape (n_obs, n_samples).
+      weights: PSIS weights of shape (n_obs, n_samples).
       n_boot: Number of Bayesian bootstrap replications.
       ci_level: Credible interval level for bands.
       rng: NumPy random generator.
@@ -3609,7 +3611,10 @@ def _compute_calibration_curve_data(
     expected_coverage: Float64Matrix1D = np.array(
         [*np.arange(0.05, 0.96, 0.05).tolist(), 0.99, 1.0]
     )
-    weights, _pareto_k = compute_psis_weights(log_likelihood)
+
+    if log_likelihood is not None:
+        weights, _pareto_k = compute_psis_weights(log_likelihood)
+    assert weights is not None, "PSIS weights are not available!"
     # compute loo pit values
     loo_pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
     # calculate emprirical coverage values
@@ -3655,7 +3660,9 @@ def _compute_calibration_curve_data(
 def plot_loo_calibration_curve_with_reference(
     y_obs: Float64Matrix1D,
     y_pred: Float64Matrix2D,
-    log_likelihood: Float64Matrix2D,
+    *,
+    log_likelihood: Float64Matrix2D | None = None,
+    weights: Float64Matrix2D | None = None,
     n_boot: int = 10000,
     ci_level: float = 0.95,
     figsize: tuple[float, float] = (7, 7),
@@ -3675,6 +3682,7 @@ def plot_loo_calibration_curve_with_reference(
         y_obs: Observed data vector of shape (n_obs,).
         y_pred: Posterior predictive draws of shape (n_obs, n_samples).
         log_likelihood: Log-likelihood matrix of shape (n_obs, n_samples).
+        weights: PSIS weights of shape (n_obs, n_samples).
         n_boot: Number of Bayesian bootstrap replications. Defaults to 10000.
         ci_level: Credible interval level for the bootstrap and sampling bands.
             Defaults to 0.95.
@@ -3706,7 +3714,7 @@ def plot_loo_calibration_curve_with_reference(
     )
 
     d = _compute_calibration_curve_data(
-        y_obs, y_pred, log_likelihood, n_boot, ci_level, rng
+        y_obs, y_pred, log_likelihood, weights, n_boot, ci_level, rng
     )
 
     if ax is None:
@@ -3887,7 +3895,7 @@ def plot_loo_calibration_curves(
     fig, calib_res = plot_loo_calibration_curve_with_reference(
         y_obs,
         y_pred,
-        log_lik_flat,
+        log_likelihood=log_lik_flat,
         n_boot=n_boot,
         ci_level=ci_level,
         random_seed=random_seed,
