@@ -163,10 +163,9 @@ source .venv/bin/activate
 ├── src/
 │   └── compressor_fouling_modeling/
 │       ├── __init__.py
-│       └── utility.py                 # All model code (5922 lines)
+│       └── utility.py                 # All model code (6051 lines)
 ├── tests/
-│   ├── test_calibration.py            # Calibration curve tests
-│   └── test_loo_calibration.py        # LOO-PIT calibration tests
+│   └── test_loo_calibration.py        # LOO-PIT calibration & curve tests
 ├── pyproject.toml                     # Project config & dependencies
 ├── requirements.txt                   # Pinned dependencies
 ├── uv.lock                            # uv lockfile
