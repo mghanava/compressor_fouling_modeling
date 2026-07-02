@@ -1,28 +1,42 @@
-""" Unit tests for plot_loo_calibration_curve_with_reference and
-compute_loo_pit_model_agnostic.
+"""Unit tests for plot_loo_calibration_curve_with_reference and related helpers.
 
 Test strategy
 -------------
-Three tiers of tests:
+Five tiers of tests:
 
 1. **Analytical / unit tests** - feed known inputs (pre-computed PIT values,
-   exact uniform samples) directly into the helpers and assert outputs are
-   correct without touching PyMC.
+   exact uniform samples) directly into ``compute_loo_pit_model_agnostic``
+   and assert outputs are correct without touching PyMC.
+
+1b. **Calibration curve helper unit tests** - test ``null_coverage_band``,
+   ``bayesian_bootstrap_band``, ``calculate_empirical_coverage``,
+   ``calculate_calibration_error``, and ``calculate_miscalibrated_coverage``
+   with synthetic inputs to verify invariants (bounds, symmetry,
+   monotonicity, sensitivity to ESS/n, edge cases).
 
 2. **Oracle (self-consistent) PyMC model** - generate data *from* a model,
-   then fit *that exact model* on it.  Because the model is correctly specified,
-   LOO-PIT must be approximately Uniform(0,1) and the calibration curve must
-   lie on the diagonal.  This is the gold-standard positive test.
+   then fit *that exact model* on it.  Because the model is correctly
+   specified, LOO-PIT must be approximately Uniform(0,1) and the calibration
+   curve must lie on the diagonal.  This is the gold-standard positive test.
 
 3. **Deliberately miscalibrated PyMC models** - fit a model that is *wrong*
-   (e.g. variance too small → over-confident → LOO-PIT will be S-shaped).
-   These are negative tests: the function *must* detect miscalibration.
+   (e.g. variance too small, wrong likelihood family, biased prior).
+   These are negative tests: the diagnostic *must* detect miscalibration.
+
+4. **Integration smoke test** - ``plot_loo_calibration_curve_with_reference``
+   runs end-to-end on a known-calibrated input and returns valid
+   ``CalibrationStats``.
+
+5. **Multi-scenario visual diagnostic grid** - generates a 5x6 diagnostic
+   grid covering calibrated and miscalibrated scenarios (mean-shifted up/down,
+   scale wider/narrower) and asserts the KS test passes/fails accordingly.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 import io
+import math
 from pathlib import Path
 from typing import ClassVar, TypedDict
 
@@ -91,9 +105,9 @@ def _fit_oracle_normal(
     posterior predictive *must* be calibrated.
 
     Returns
-    -------
-    y_obs : (n,) observed data
-    idata : ArviZ InferenceData with posterior_predictive and log_likelihood
+        A tuple (y_obs, idata), where y_obs is observed data of shape (n_obs,)
+        and idata is ArviZ InferenceData with posterior_predictive and
+        log_likelihood.
     """
     rng = np.random.default_rng(rng_seed)
     y_obs = rng.normal(true_mu, true_sigma, size=n)
@@ -126,9 +140,9 @@ def _extract_pred_and_weights(
     an ArviZ InferenceData object.
 
     Returns
-    -------
-    y_pred_flat : (n_obs, n_samples)  -- predictive samples, obs on axis-0
-    weights     : (n_obs, n_samples)  -- normalized PSIS weights
+        A tupe (y_pred_flat, weights), where y_pred_flat is predictive samples
+        of shape (n_obs, n_samples) and weights is normalized PSIS weights of
+        shape (n_obs, n_samples).
     """
     y_pred_flat: Float64Matrix2D = extract(
         idata, group="posterior_predictive", combined=True
@@ -143,7 +157,7 @@ def _extract_pred_and_weights(
 
 
 # ============================================================================
-# Tier 1: Analytical / unit tests (no PyMC)
+# Tier 1a: Analytical / unit tests (no PyMC)
 # ============================================================================
 
 
@@ -242,6 +256,375 @@ class TestComputeLooPitAnalytical:
         assert p_value < 0.05, (
             f"KS test should have rejected uniformity for biased PIT (p={p_value:.4f})"
         )
+
+
+# ============================================================================
+# Tier 1b: Calibration curve helper unit tests (no PyMC)
+# ============================================================================
+
+
+class TestNullCoverageBand:
+    """Unit tests for null_coverage_band."""
+
+    def test_bounds_ordered(self):
+        """Lower bound must be ≤ upper bound at every grid point."""
+        rng = np.random.default_rng(RNG_SEED)
+        n_obs, n_samples = 50, 200
+        weights = _uniform_weights(n_obs, n_samples)
+        grid = np.linspace(0.05, 0.95, 19)
+        lower, upper = null_coverage_band(weights, grid, rng, B=500)
+        assert np.all(lower <= upper + 1e-15), "lower > upper at some grid point"
+
+    def test_bounds_in_unit_interval(self):
+        """Band bounds must lie in [0, 1] as grid lies in [0, 1]."""
+        rng = np.random.default_rng(RNG_SEED)
+        n_obs, n_samples = 50, 200
+        weights = _uniform_weights(n_obs, n_samples)
+        grid = np.linspace(0.05, 0.95, 19)
+        lower, upper = null_coverage_band(weights, grid, rng, B=500)
+        assert np.all(lower >= 0.0), f"lower bound below 0: {lower}"
+        assert np.all(upper <= 1.0 + 1e-15), f"upper bound above 1: {upper}"
+
+    def test_band_centers_on_diagonal(self):
+        """For uniform weights, band should be centered near the diagonal."""
+        rng = np.random.default_rng(RNG_SEED)
+        n_obs, n_samples = 200, 500
+        weights = _uniform_weights(n_obs, n_samples)
+        grid = np.array([0.25, 0.50, 0.75])
+        lower, upper = null_coverage_band(weights, grid, rng, B=1000)
+        midpoint = (lower + upper) / 2
+        assert np.all(np.abs(midpoint - grid) < 0.05), (
+            f"Band midpoint {midpoint} deviates from grid {grid}"
+        )
+
+    def test_band_narrows_with_more_observations(self):
+        """Band width should decrease as n_obs increases (higher ESS)."""
+        n_samples = 500
+        grid = np.array([0.25, 0.50, 0.75])
+        lo20, up20 = null_coverage_band(
+            _uniform_weights(20, n_samples),
+            grid,
+            np.random.default_rng(RNG_SEED),
+            B=500,
+        )
+        lo200, up200 = null_coverage_band(
+            _uniform_weights(200, n_samples),
+            grid,
+            np.random.default_rng(RNG_SEED),
+            B=500,
+        )
+        assert (up20 - lo20)[0] > (up200 - lo200)[0], (
+            "Larger n_obs should produce narrower band"
+        )
+
+    def test_low_ess_produces_wide_band(self):
+        """Near-degenerate weights (Effective Sample Size ≈ 1) should produce a
+        very wide band."""
+        rng = np.random.default_rng(RNG_SEED)
+        n_obs, n_samples = 10, 100
+        # only one sample carries weight → ESS ≈ 1 per observation
+        weights = np.zeros((n_obs, n_samples))
+        weights[:, 0] = 1.0
+        grid = np.array([0.25, 0.50, 0.75])
+        lower, upper = null_coverage_band(weights, grid, rng, B=500)
+        width = upper[0] - lower[0]
+        assert width > 0.5, f"Expected wide band for low ESS, got width={width:.3f}"
+
+    def test_reproducible_with_same_seed(self):
+        """Same RNG seed must produce identical band."""
+        grid = np.array([0.25, 0.50, 0.75])
+        n_obs, n_samples = 30, 100
+        weights = _uniform_weights(n_obs, n_samples)
+        lower1, upper1 = null_coverage_band(
+            weights, grid, np.random.default_rng(42), B=500
+        )
+        lower2, upper2 = null_coverage_band(
+            weights, grid, np.random.default_rng(42), B=500
+        )
+        np.testing.assert_array_equal(lower1, lower2)
+        np.testing.assert_array_equal(upper1, upper2)
+
+
+class TestBayesianBootstrapBand:
+    """Unit tests for bayesian_bootstrap_band."""
+
+    def test_bounds_ordered(self):
+        """Lower bound must be ≤ upper bound at every grid point."""
+        rng = np.random.default_rng(RNG_SEED)
+        n = 100
+        loo_pit = rng.uniform(0, 1, size=n)
+        grid = np.linspace(0.05, 0.95, 19)
+        lower, upper = bayesian_bootstrap_band(loo_pit, grid, rng, B=500)
+        assert np.all(lower <= upper + 1e-15), "lower > upper at some grid point"
+
+    def test_bounds_in_unit_interval(self):
+        """Band bounds must lie in [0, 1] as grid lies in [0, 1]."""
+        rng = np.random.default_rng(RNG_SEED)
+        n = 100
+        loo_pit = rng.uniform(0, 1, size=n)
+        grid = np.linspace(0.05, 0.95, 19)
+        lower, upper = bayesian_bootstrap_band(loo_pit, grid, rng, B=500)
+        assert np.all(lower >= 0.0), f"lower bound below 0: {lower}"
+        assert np.all(upper <= 1.0 + 1e-15), f"upper bound above 1: {upper}"
+
+    def test_band_symmetric_for_uniform_pit(self):
+        """For uniform PIT, band should be symmetric around the diagonal."""
+        rng = np.random.default_rng(RNG_SEED)
+        n = 500
+        loo_pit = rng.uniform(0, 1, size=n)
+        grid = np.array([0.25, 0.50, 0.75])
+        lower, upper = bayesian_bootstrap_band(loo_pit, grid, rng, B=1000)
+        midpoint = (lower + upper) / 2
+        assert np.all(np.abs(midpoint - grid) < 0.03), (
+            f"Midpoint {midpoint} deviates from grid {grid}"
+        )
+
+    def test_band_narrows_with_more_observations(self):
+        """Band width should decrease as n increases."""
+        grid = np.array([0.25, 0.50, 0.75])
+        pit30 = np.random.default_rng(RNG_SEED).uniform(0, 1, size=30)
+        pit300 = np.random.default_rng(RNG_SEED).uniform(0, 1, size=300)
+        lo30, up30 = bayesian_bootstrap_band(
+            pit30, grid, np.random.default_rng(RNG_SEED), B=500
+        )
+        lo300, up300 = bayesian_bootstrap_band(
+            pit300, grid, np.random.default_rng(RNG_SEED), B=500
+        )
+        assert (up30 - lo30)[0] > (up300 - lo300)[0], (
+            f"Expected narrower band for larger n, got {(up30 - lo30)[0]:.4f} → {(up300 - lo300)[0]:.4f}"
+        )
+
+    def test_band_snaps_to_zero_one_at_edges(self):
+        """At grid=0 and grid=1 the band should be essentially 0 and 1."""
+        rng = np.random.default_rng(RNG_SEED)
+        n = 100
+        loo_pit = rng.uniform(0, 1, size=n)
+        grid = np.array([0.0, 1.0])
+        lower, upper = bayesian_bootstrap_band(loo_pit, grid, rng, B=500)
+        np.testing.assert_allclose(lower[0], 0.0, atol=1e-10)
+        np.testing.assert_allclose(upper[0], 0.0, atol=1e-10)
+        np.testing.assert_allclose(lower[1], 1.0, atol=1e-10)
+        np.testing.assert_allclose(upper[1], 1.0, atol=1e-10)
+
+    def test_reproducible_with_same_seed(self):
+        """Same RNG seed must produce identical band."""
+        rng = np.random.default_rng(42)
+        n = 100
+        loo_pit = rng.uniform(0, 1, size=n)
+        grid = np.array([0.25, 0.50, 0.75])
+        lower1, upper1 = bayesian_bootstrap_band(
+            loo_pit, grid, np.random.default_rng(42), B=500
+        )
+        lower2, upper2 = bayesian_bootstrap_band(
+            loo_pit, grid, np.random.default_rng(42), B=500
+        )
+        np.testing.assert_array_equal(lower1, lower2)
+        np.testing.assert_array_equal(upper1, upper2)
+
+
+class TestCalculateEmpiricalCoverage:
+    """Unit tests for calculate_empirical_coverage."""
+
+    def test_perfect_uniform_pit(self):
+        """Uniform PIT should give coverage ≈ expected level."""
+        rng = np.random.default_rng(RNG_SEED)
+        n = 10000
+        loo_pit = rng.uniform(0, 1, size=n)
+        expected = np.array([0.25, 0.50, 0.75])
+        emp = calculate_empirical_coverage(loo_pit, expected)
+        assert np.all(np.abs(emp - expected) < 0.02), (
+            f"Empirical coverage {emp} deviates from expected {expected}"
+        )
+
+    def test_all_below_threshold(self):
+        """If all PIT values are below the smallest threshold, coverage = 1."""
+        loo_pit = np.array([0.01, 0.02, 0.03])
+        expected = np.array([0.05, 0.10])
+        emp = calculate_empirical_coverage(loo_pit, expected)
+        np.testing.assert_array_equal(emp, np.array([1.0, 1.0]))
+
+    def test_all_above_threshold(self):
+        """If all PIT values are above the largest threshold, coverage = 0."""
+        loo_pit = np.array([0.9, 0.95, 0.99])
+        expected = np.array([0.25, 0.50])
+        emp = calculate_empirical_coverage(loo_pit, expected)
+        np.testing.assert_array_equal(emp, np.array([0.0, 0.0]))
+
+    def test_monotonic_increasing(self):
+        """Empirical coverage must be non-decreasing with expected coverage."""
+        rng = np.random.default_rng(RNG_SEED)
+        loo_pit = rng.uniform(0, 1, size=1000)
+        expected = np.linspace(0.05, 0.95, 19)
+        emp = calculate_empirical_coverage(loo_pit, expected)
+        assert np.all(np.diff(emp) >= -1e-15), (
+            "Empirical coverage decreased for higher expected level"
+        )
+
+
+class TestCalculateCalibrationError:
+    """Unit tests for calculate_calibration_error."""
+
+    def test_perfect_calibration_zero_error(self):
+        """Perfect calibration yields error of 0."""
+        expected = np.array([0.25, 0.50, 0.75])
+        empirical = expected.copy()
+        err, werr = calculate_calibration_error(expected, empirical)
+        assert math.isclose(err, 0.0)
+        assert math.isclose(werr, 0.0)
+
+    def test_known_deviation(self):
+        """A known constant offset produces the expected MAE."""
+        expected = np.array([0.25, 0.50, 0.75])
+        offset = 0.05
+        empirical = expected + offset
+        err, _werr = calculate_calibration_error(expected, empirical)
+        assert abs(err - offset) < 1e-15
+
+    def test_weighted_error_differs_from_unweighted(self):
+        """Weighted error should differ when deviations are concentrated in mid-range."""
+        expected = np.array([0.1, 0.5, 0.9])
+        empirical = np.array([0.3, 0.3, 0.7])
+        err, werr = calculate_calibration_error(expected, empirical)
+        assert abs(err - werr) > 0, (
+            f"Weighted error {werr} should differ from unweighted {err}"
+        )
+
+    def test_all_identical_arrays(self):
+        """Identical arrays produce zero error regardless of values."""
+        expected = np.array([0.0, 0.3, 0.7, 1.0])
+        empirical = expected.copy()
+        err, werr = calculate_calibration_error(expected, empirical)
+        assert math.isclose(err, 0.0)
+        assert math.isclose(werr, 0.0)
+
+    def test_weighted_error_is_nonnegative(self):
+        """Both error metrics must be non-negative."""
+        expected = np.array([0.25, 0.50, 0.75])
+        empirical = np.array([0.30, 0.45, 0.80])
+        err, werr = calculate_calibration_error(expected, empirical)
+        assert err >= 0.0
+        assert werr >= 0.0
+
+
+class TestCalculateMiscalibratedCoverage:
+    """Unit tests for calculate_miscalibrated_coverage."""
+
+    def test_all_overlapping_no_miscalibration(self):
+        """When sampling and bootstrap bands overlap at all levels, none flagged."""
+        emp = np.array([0.25, 0.50, 0.75])
+        exp = np.array([0.25, 0.50, 0.75])
+        sl = np.array([0.20, 0.45, 0.70])
+        su = np.array([0.30, 0.55, 0.80])
+        bl = np.array([0.22, 0.47, 0.72])
+        bu = np.array([0.28, 0.53, 0.78])
+        flagged = calculate_miscalibrated_coverage(emp, exp, sl, su, bl, bu)
+        assert not np.any(flagged), f"No levels should be miscalibrated: {flagged}"
+
+    def test_all_non_overlapping_all_miscalibrated(self):
+        """When bands do not overlap and emp ≠ exp, all flagged."""
+        emp = np.array([0.9, 0.9, 0.9])
+        exp = np.array([0.25, 0.50, 0.75])
+        # sampling band sits low, bootstrap band sits high → no overlap
+        sl = np.array([0.05, 0.05, 0.05])
+        su = np.array([0.15, 0.15, 0.15])
+        bl = np.array([0.80, 0.80, 0.80])
+        bu = np.array([0.95, 0.95, 0.95])
+        flagged = calculate_miscalibrated_coverage(emp, exp, sl, su, bl, bu)
+        assert np.all(flagged), f"All levels should be miscalibrated: {flagged}"
+
+    def test_partial_overlap(self):
+        """Only levels where bands do not overlap and emp deviates should flag."""
+        emp = np.array([0.25, 0.90, 0.75])
+        exp = np.array([0.25, 0.50, 0.75])
+        # index 0: emp≈exp, bands overlap → calibrated
+        # index 1: emp>>exp, bands don't overlap → miscalibrated
+        # index 2: emp≈exp, bands overlap → calibrated
+        sl = np.array([0.20, 0.10, 0.70])
+        su = np.array([0.30, 0.20, 0.80])
+        bl = np.array([0.22, 0.80, 0.72])
+        bu = np.array([0.28, 0.90, 0.78])
+        flagged = calculate_miscalibrated_coverage(emp, exp, sl, su, bl, bu)
+        expected_flag = np.array([False, True, False])
+        np.testing.assert_array_equal(flagged, expected_flag)
+
+    def test_sampling_band_encompasses_bootstrap(self):
+        """If sampling band fully contains bootstrap band → all calibrated."""
+        emp = np.array([0.25, 0.50, 0.75])
+        exp = np.array([0.25, 0.50, 0.75])
+        sl = np.array([0.0, 0.0, 0.0])  # very wide sampling band
+        su = np.array([1.0, 1.0, 1.0])
+        bl = np.array([0.22, 0.47, 0.72])
+        bu = np.array([0.28, 0.53, 0.78])
+        flagged = calculate_miscalibrated_coverage(emp, exp, sl, su, bl, bu)
+        assert not np.any(flagged)
+
+    def test_empirical_far_below_expected(self):
+        """When empirical far below expected and bands do not overlap, flag all."""
+        emp = np.array([0.05, 0.10, 0.20])
+        exp = np.array([0.25, 0.50, 0.75])
+        # sampling band sits entirely above bootstrap band → no overlap
+        sl = np.array([0.30, 0.55, 0.80])
+        su = np.array([0.35, 0.60, 0.85])
+        bl = np.array([0.02, 0.05, 0.10])
+        bu = np.array([0.08, 0.15, 0.25])
+        flagged = calculate_miscalibrated_coverage(emp, exp, sl, su, bl, bu)
+        assert np.all(flagged), (
+            "Empirical far from expected should be flagged everywhere"
+        )
+
+
+# ============================================================================
+# Tier 1c: Parametrized edge-case coverage (no PyMC)
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "n_obs,n_samples",
+    [
+        (10, 500),  # tiny dataset
+        (1000, 500),  # large dataset
+        (50, 50),  # few samples
+    ],
+)
+def test_compute_loo_pit_shapes(
+    n_obs: int,
+    n_samples: int,
+):
+    """Output shape is always (n_obs,) regardless of input sizes.
+
+    ``@pytest.mark.parametrize`` injects ``n_obs`` and ``n_samples`` from the
+    list of tuples above — pytest calls this function once per tuple.
+    """
+    rng = np.random.default_rng(RNG_SEED)
+    y_obs = rng.standard_normal(n_obs)
+    y_pred = rng.standard_normal((n_obs, n_samples))
+    weights = _uniform_weights(n_obs, n_samples)
+
+    pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
+    assert pit.shape == (n_obs,), f"Expected ({n_obs},), got {pit.shape}"
+
+
+@pytest.mark.parametrize("true_mu,true_sigma", [(0, 1), (5, 2), (-3, 0.5)])
+def test_ks_uniformity_various_normals(
+    true_mu: float,
+    true_sigma: float,
+):
+    """
+    Oracle NumPy test (no PyMC) across different N(mu, sigma) parameters.
+    PIT must be uniform for any correctly-specified normal model.
+
+    ``@pytest.mark.parametrize`` injects ``true_mu`` and ``true_sigma`` from
+    the list of tuples — pytest calls this function once per tuple.
+    """
+    rng = np.random.default_rng(RNG_SEED)
+    n_obs, n_samples = 500, 3000
+    y_obs = rng.normal(true_mu, true_sigma, n_obs)
+    y_pred = rng.normal(true_mu, true_sigma, (n_obs, n_samples))
+    weights = _uniform_weights(n_obs, n_samples)
+
+    pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
+    _, p = stats.kstest(pit, "uniform")
+    assert p > 0.05, f"KS test failed for N({true_mu}, {true_sigma}): p={p:.4f}"
 
 
 # ============================================================================
@@ -874,50 +1257,3 @@ class TestCalibrationScenarioGrid:
         img = plt.imread(buf)
         plt.close(fig)
         return img
-
-
-# ============================================================================
-# Parametrized edge-case coverage
-# ============================================================================
-
-
-@pytest.mark.parametrize(
-    "n_obs,n_samples",
-    [
-        (10, 500),  # tiny dataset
-        (1000, 500),  # large dataset
-        (50, 50),  # few samples
-    ],
-)
-def test_compute_loo_pit_shapes(
-    n_obs: int,
-    n_samples: int,
-):
-    """Output shape is always (n_obs,) regardless of input sizes."""
-    rng = np.random.default_rng(RNG_SEED)
-    y_obs = rng.standard_normal(n_obs)
-    y_pred = rng.standard_normal((n_obs, n_samples))
-    weights = _uniform_weights(n_obs, n_samples)
-
-    pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
-    assert pit.shape == (n_obs,), f"Expected ({n_obs},), got {pit.shape}"
-
-
-@pytest.mark.parametrize("true_mu,true_sigma", [(0, 1), (5, 2), (-3, 0.5)])
-def test_ks_uniformity_various_normals(
-    true_mu: float,
-    true_sigma: float,
-):
-    """
-    Oracle NumPy test (no PyMC) across different N(mu, sigma) parameters.
-    PIT must be uniform for any correctly-specified normal model.
-    """
-    rng = np.random.default_rng(RNG_SEED)
-    n_obs, n_samples = 500, 3000
-    y_obs = rng.normal(true_mu, true_sigma, n_obs)
-    y_pred = rng.normal(true_mu, true_sigma, (n_obs, n_samples))
-    weights = _uniform_weights(n_obs, n_samples)
-
-    pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
-    _, p = stats.kstest(pit, "uniform")
-    assert p > 0.05, f"KS test failed for N({true_mu}, {true_sigma}): p={p:.4f}"
