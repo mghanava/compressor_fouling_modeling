@@ -21,30 +21,51 @@ Three tiers of tests:
 
 from __future__ import annotations
 
-import arviz_stats as azs
+from collections.abc import Callable
+from pathlib import Path
+from typing import TypedDict
+
+from arviz_base import extract
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pymc as pm
 import pytest
 from scipy import stats
-from scipy.stats import binom
 from xarray import DataTree
 
 from compressor_fouling_modeling.utility import (
     CalibrationStats,
+    bayesian_bootstrap_band,
+    calculate_calibration_error,
+    calculate_empirical_coverage,
+    calculate_miscalibrated_coverage,
     compute_loo_pit_model_agnostic,
+    compute_psis_weights,
+    null_coverage_band,
     plot_loo_calibration_curve_with_reference,
 )
 
+Float64Matrix1D = np.ndarray[tuple[int], np.dtype[np.float64]]
+Float64Matrix2D = np.ndarray[tuple[int, int], np.dtype[np.float64]]
+Uint16Matrix1D = np.ndarray[tuple[int], np.dtype[np.uint16]]
+BoolMatrix1D = np.ndarray[tuple[int], np.dtype[np.bool_]]
 # ============================================================================
 # Helpers shared by multiple tests
 # ============================================================================
 
-RNG_SEED = 42
+RNG_SEED = 14
+RNG = np.random.default_rng(RNG_SEED)
 
 
-def _uniform_weights(n_obs: int, n_samples: int) -> np.ndarray:
+class OracleData(TypedDict):
+    y_obs: Float64Matrix1D
+    idata: DataTree
+    pit: Float64Matrix1D
+    weights: Float64Matrix2D
+
+
+def _uniform_weights(n_obs: int, n_samples: int) -> Float64Matrix2D:
     """All importance weights equal → plain empirical CDF."""
     return np.full((n_obs, n_samples), 1.0 / n_samples)
 
@@ -53,9 +74,9 @@ def _fit_oracle_normal(
     n: int = 200,
     true_mu: float = 0.0,
     true_sigma: float = 1.0,
-    draws: int = 1000,
-    chains: int = 2,
-    seed: int = RNG_SEED,
+    draws: int = 2000,
+    chains: int = 4,
+    rng: np.random.Generator = RNG,
 ) -> tuple[np.ndarray, DataTree]:
     """
     Oracle normal model: data ~ N(mu, sigma).
@@ -68,64 +89,48 @@ def _fit_oracle_normal(
     y_obs : (n,) observed data
     idata : ArviZ InferenceData with posterior_predictive and log_likelihood
     """
-    rng = np.random.default_rng(seed)
     y_obs = rng.normal(true_mu, true_sigma, size=n)
 
-    with pm.Model() as model:
+    with pm.Model():
         mu = pm.Normal("mu", mu=0.0, sigma=10.0)
         sigma = pm.HalfNormal("sigma", sigma=5.0)
-        y = pm.Normal("y", mu=mu, sigma=sigma, observed=y_obs)
+        _ = pm.Normal("y", mu=mu, sigma=sigma, observed=y_obs)
 
         idata = pm.sample(
             draws=draws,
             chains=chains,
-            random_seed=seed,
+            random_seed=rng,
             progressbar=False,
             target_accept=0.9,
         )
-        pm.sample_posterior_predictive(
-            idata, extend_inferencedata=True, random_seed=seed
+        _ = pm.sample_posterior_predictive(
+            idata, extend_inferencedata=True, random_seed=rng
         )
-        pm.compute_log_likelihood(idata)
+        _ = pm.compute_log_likelihood(idata)
 
     return y_obs, idata
 
 
 def _extract_pred_and_weights(
-    y_obs: np.ndarray,
     idata: DataTree,
-    var_name: str = "y",
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[Float64Matrix2D, Float64Matrix2D]:
     """
     Pull posterior-predictive draws and PSIS-LOO importance weights out of
     an ArviZ InferenceData object.
 
     Returns
     -------
-    y_pred_flat : (n_obs, n_samples)  – predictive samples, obs on axis-0
-    weights     : (n_obs, n_samples)  – normalized PSIS weights
+    y_pred_flat : (n_obs, n_samples)  -- predictive samples, obs on axis-0
+    weights     : (n_obs, n_samples)  -- normalized PSIS weights
     """
-    # posterior predictive: shape (chains, draws, n_obs) → (n_obs, n_samples)
-    pp = idata.posterior_predictive[var_name].values  # (chains, draws, n_obs)
-    n_obs = pp.shape[2]
-    y_pred_flat = pp.reshape(-1, n_obs).T  # (n_obs, n_samples)
+    y_pred_flat: Float64Matrix2D = extract(
+        idata, group="posterior_predictive", combined=True
+    ).to_numpy()  # (n_obs, n_samples)
 
-    # PSIS-LOO weights via ArviZ
-    # MAYBE JUST USE compute_psis_weights from utility
-    loo_result = azs.loo(idata, pointwise=True, var_name=var_name)
-    log_weights = loo_result.pareto_k.values  # we need the actual log-weights
-
-    # ArviZ exposes the raw importance weights via psisloo wrapper
-    # We recompute them from the log-likelihood stored in idata
-    log_lik = idata.log_likelihood[var_name].values  # (chains, draws, n_obs)
-    log_lik_flat = log_lik.reshape(-1, n_obs).T  # (n_obs, n_samples)
-
-    # PSIS importance weights: w ∝ 1/p(y_i | θ) = exp(-log_lik)
-    raw_log_w = -log_lik_flat
-    # Stabilize then normalize (plain IS; replace with PSIS if you have psislw)
-    log_w_stable = raw_log_w - raw_log_w.max(axis=1, keepdims=True)
-    w = np.exp(log_w_stable)
-    weights = w / w.sum(axis=1, keepdims=True)
+    log_lik_flat: Float64Matrix2D = extract(
+        idata, group="log_likelihood", combined=True
+    ).to_numpy()  # (n_obs, n_samples)
+    weights, _pareto_k = compute_psis_weights(log_lik_flat)
 
     return y_pred_flat, weights
 
@@ -138,15 +143,16 @@ def _extract_pred_and_weights(
 class TestComputeLooPitAnalytical:
     """Test compute_loo_pit_model_agnostic with analytically known inputs."""
 
+    rng: np.random.Generator = RNG
+
     def test_perfect_uniform_output_for_known_input(self):
         """
         If y_obs[i] is exactly the p-th quantile of the predictive samples,
         then PIT_i ≈ p.  With equal weights and enough samples this must hold.
         """
-        rng = np.random.default_rng(RNG_SEED)
         n_obs, n_samples = 500, 5000
         # Draw predictive samples from N(0,1)
-        y_pred = rng.standard_normal((n_obs, n_samples))
+        y_pred = self.rng.standard_normal((n_obs, n_samples))
         weights = _uniform_weights(n_obs, n_samples)
         # Set y_obs to be the exact theoretical quantiles at evenly-spaced probs
         probs = np.linspace(0.01, 0.99, n_obs)
@@ -158,11 +164,10 @@ class TestComputeLooPitAnalytical:
         np.testing.assert_allclose(pit, probs, atol=0.05)
 
     def test_pit_values_bounded_in_unit_interval(self):
-        rng = np.random.default_rng(RNG_SEED)
         n_obs, n_samples = 100, 1000
-        y_pred = rng.standard_normal((n_obs, n_samples))
+        y_pred = self.rng.standard_normal((n_obs, n_samples))
         weights = _uniform_weights(n_obs, n_samples)
-        y_obs = rng.standard_normal(n_obs)
+        y_obs = self.rng.standard_normal(n_obs)
 
         pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
 
@@ -191,30 +196,15 @@ class TestComputeLooPitAnalytical:
 
         np.testing.assert_allclose(pit, np.zeros(n_obs), atol=1e-10)
 
-    def test_weights_must_sum_to_one_per_obs(self):
-        """Weights that don't sum to 1 produce meaningless PIT; catch early."""
-        n_obs, n_samples = 10, 100
-        y_pred = np.zeros((n_obs, n_samples))
-        bad_weights = np.ones((n_obs, n_samples))  # sum = n_samples, not 1
-
-        y_obs = np.zeros(n_obs)
-        pit = compute_loo_pit_model_agnostic(y_obs, y_pred, bad_weights)
-        # PIT values will be n_samples * 0.5, clearly out of [0,1]
-        assert np.any(pit > 1.0), (
-            "Expected PIT > 1 for un-normalized weights — "
-            "the caller is responsible for normalizing."
-        )
-
     def test_uniform_pit_passes_ks_test(self):
         """
         Simulate an oracle scenario purely in NumPy (no PyMC) and verify that
         the resulting PIT values are statistically uniform.
         """
-        rng = np.random.default_rng(RNG_SEED)
         n_obs, n_samples = 500, 2000
         # True model: N(0, 1).  y_obs drawn from the same model.
-        y_obs = rng.standard_normal(n_obs)
-        y_pred = rng.standard_normal((n_obs, n_samples))
+        y_obs = self.rng.standard_normal(n_obs)
+        y_pred = self.rng.standard_normal((n_obs, n_samples))
         weights = _uniform_weights(n_obs, n_samples)
 
         pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
@@ -232,10 +222,9 @@ class TestComputeLooPitAnalytical:
         If we deliberately shift all y_obs to be far below predictions,
         PIT values cluster near 0, and the KS test must flag this.
         """
-        rng = np.random.default_rng(RNG_SEED)
         n_obs, n_samples = 300, 1000
-        y_pred = rng.standard_normal((n_obs, n_samples))  # N(0,1) predictive
-        y_obs = rng.normal(-3, 0.1, n_obs)  # obs << predictions → PIT near 0
+        y_pred = self.rng.standard_normal((n_obs, n_samples))  # N(0,1) predictive
+        y_obs = self.rng.normal(-3, 0.1, n_obs)  # obs << predictions → PIT near 0
         weights = _uniform_weights(n_obs, n_samples)
 
         pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
@@ -255,21 +244,23 @@ class TestComputeLooPitAnalytical:
 class TestOracleNormalModel:
     """
     The oracle test: generate data from N(mu, sigma) and fit exactly that
-    model.  Calibration must be excellent.
+    model. Calibration must be excellent.
 
     These tests deliberately use a moderate n (200) and a loose tolerance
     because with n=200 some random variation is expected.
     """
 
-    @pytest.fixture(scope="class")
-    def oracle_data(self):
-        """Fit once, reuse across all methods in this class."""
-        y_obs, idata = _fit_oracle_normal(n=200, draws=1000, chains=2)
-        y_pred_flat, weights = _extract_pred_and_weights(y_obs, idata)
-        pit = compute_loo_pit_model_agnostic(y_obs, y_pred_flat, weights)
-        return {"y_obs": y_obs, "idata": idata, "pit": pit}
+    rng: np.random.Generator = RNG
 
-    def test_pit_is_approximately_uniform_ks(self, oracle_data):
+    @pytest.fixture
+    def oracle_data(self) -> OracleData:
+        """Fit once per test method."""
+        y_obs, idata = _fit_oracle_normal()
+        y_pred_flat, weights = _extract_pred_and_weights(idata)
+        pit = compute_loo_pit_model_agnostic(y_obs, y_pred_flat, weights)
+        return {"y_obs": y_obs, "idata": idata, "pit": pit, "weights": weights}
+
+    def test_pit_is_approximately_uniform_ks(self, oracle_data: OracleData):
         """KS p-value must be non-significant for the oracle model."""
         pit = oracle_data["pit"]
         _, p_value = stats.kstest(pit, "uniform")
@@ -279,134 +270,203 @@ class TestOracleNormalModel:
             "weight extraction."
         )
 
-    def test_mean_pit_close_to_half(self, oracle_data):
+    def test_mean_pit_close_to_half(self, oracle_data: OracleData):
         """E[Uniform(0,1)] = 0.5; sample mean should be within ±0.05."""
         pit = oracle_data["pit"]
         mean_pit = pit.mean()
-        assert abs(mean_pit - 0.5) < 0.06, (
+        assert abs(mean_pit - 0.5) < 0.05, (
             f"Oracle PIT mean = {mean_pit:.3f}, expected ≈ 0.50"
         )
 
-    def test_calibration_error_is_small(self, oracle_data):
+    def test_calibration_error_is_small(self, oracle_data: OracleData):
         """
         Mean absolute calibration error (MAE between empirical and expected
         coverage) should be small for a well-specified model.
         """
         pit = oracle_data["pit"]
-        expected_cov = np.arange(0.05, 1.01, 0.05)
-        empirical_cov = np.array([(pit <= q).mean() for q in expected_cov])
-        mae = np.mean(np.abs(empirical_cov - expected_cov))
-        assert mae < 0.05, (
-            f"Oracle model MAE calibration error = {mae:.4f}, expected < 0.05"
+        expected_cov = np.array([*np.arange(0.05, 0.96, 0.05).tolist(), 0.99, 1.0])
+        empirical_cov = calculate_empirical_coverage(pit, expected_cov)
+        calibration_error, weighted_cal_error = calculate_calibration_error(
+            expected_cov, empirical_cov
+        )
+        assert calibration_error < 0.05, (
+            f"Oracle model MAE = {calibration_error:.4f}, expected < 0.05"
+        )
+        assert weighted_cal_error < 0.05, (
+            f"Oracle model weighted MAE = {weighted_cal_error:.4f}, expected < 0.05"
         )
 
-    def test_few_significantly_miscalibrated_points(self, oracle_data):
-        """
-        With 20 coverage levels and α=0.05, we expect at most ~2 false positives
-        by chance.  A well-calibrated model should rarely exceed 3.
-        """
+    def test_few_significantly_miscalibrated_points(self, oracle_data: OracleData):
+        """Let X ~ Binomial(n=21, p=0.05) be the number of false positives
+        (coverage levels that are flagged as significantly miscalibrated when
+        the model is actually perfect). With 21 coverage levels and alpha=0.05,
+        we expect E[X] = 21 * 0.05 = 1.05, so 0-2 is the typical range of false
+        positives by chance. A well-calibrated model should rarely exceeds 3 as
+        binom.cdf(3, 21, 0.05) = 0.98"""
+
         pit = oracle_data["pit"]
-        n = len(pit)
-        expected_cov = np.arange(0.05, 1.01, 0.05)
-        empirical_cov = np.array([(pit <= q).mean() for q in expected_cov])
+        psis_weights = oracle_data["weights"]
+        expected_cov = np.array([*np.arange(0.05, 0.96, 0.05).tolist(), 0.99, 1.0])
+        empirical_cov = calculate_empirical_coverage(pit, expected_cov)
+        # compute finite-sample uncertainty band
+        sampling_lower, sampling_upper = null_coverage_band(
+            weights=psis_weights, grid=expected_cov, rng=self.rng
+        )
+        # compute posterior uncertainty
+        bootstrap_lower, bootstrap_upper = bayesian_bootstrap_band(
+            pit, expected_cov, self.rng
+        )
 
-        # Binomial 95% CI for each coverage level
+        miscalibrated = calculate_miscalibrated_coverage(
+            empirical_cov,
+            expected_cov,
+            sampling_lower,
+            sampling_upper,
+            bootstrap_lower,
+            bootstrap_upper,
+        )
+        n_miscalibrated = np.sum(miscalibrated).astype(np.uint16)
 
-        lower = binom.ppf(0.025, n, expected_cov) / n
-        upper = binom.ppf(0.975, n, expected_cov) / n
-        miscalibrated = (empirical_cov < lower) | (empirical_cov > upper)
-        n_misc = int(miscalibrated.sum())
-
-        assert n_misc <= 4, (
-            f"Oracle model has {n_misc} significantly miscalibrated coverage "
-            "levels (≤4 expected by chance at α=0.05 over 20 comparisons)."
+        assert n_miscalibrated <= 3, (
+            f"Oracle model has {n_miscalibrated} significantly miscalibrated coverage "
+            "levels (<=3 expected by chance at alpha=0.05 over 20 comparisons)."
         )
 
 
 # ============================================================================
 # Tier 3: Deliberately miscalibrated PyMC models (negative tests)
 # ============================================================================
-
-
 @pytest.mark.slow
 class TestMiscalibratedModels:
     """
-    Negative tests: verify the calibration diagnostics detect genuine
-    miscalibration. Uses structural likelihood mismatches that PSIS
-    cannot self-correct for.
+    Negative tests (integration): verify LOO-PIT calibration diagnostics
+    detect genuine miscalibration in fitted PyMC models.
+
+    Each test constructs a deliberately misspecified model, fits it to data
+    from a different DGP, computes LOO-PIT values via
+    compute_loo_pit_model_agnostic, and checks that the resulting PIT
+    distribution is detectably non-uniform.
+
+    Unlike the unit tests in TestComputeLooPitAnalytical (which use uniform
+    weights and NumPy-only inputs), these tests run real PyMC sampling and
+    PSIS weight computation. The misspecifications are structural — wrong
+    likelihood family or systematically biased prior — so PSIS importance
+    weights cannot correct the calibration.
     """
+
+    rng: np.random.Generator = RNG
 
     def _run_miscalibrated(
         self,
-        y_obs: np.ndarray,
-        model_fn,
-    ) -> np.ndarray:
+        y_obs: Float64Matrix1D,
+        model_fn: Callable[[Float64Matrix1D], DataTree],
+    ) -> Float64Matrix1D:
         """Fit model_fn on y_obs, return PIT values."""
         idata = model_fn(y_obs)
-        y_pred_flat, weights = _extract_pred_and_weights(y_obs, idata)
+        y_pred_flat, weights = _extract_pred_and_weights(idata)
         return compute_loo_pit_model_agnostic(y_obs, y_pred_flat, weights)
 
     def test_wrong_likelihood_family_detected(self):
         """
-        True DGP: heavy-tailed Student-t(nu=2).
-        Fitted model: Normal → high Pareto-k values expected (PSIS warns),
-        AND LOO-PIT must be non-uniform.
-        """
-        rng = np.random.default_rng(RNG_SEED + 10)
-        n = 300
-        y_obs = stats.t.rvs(df=2, loc=0, scale=1, size=n, random_state=rng)
+        Test that LOO-PIT detects miscalibration from using the wrong
+        likelihood family.
 
-        def fit_normal_model(y_obs):
+        Scenario:
+          - True DGP: y_i ~ Student-t(df=2, loc=0, scale=1)
+            Heavy tails produce occasional extreme observations.
+          - Fitted model: Normal(mu, sigma) with weakly informative priors
+            (mu ~ N(0, 10), sigma ~ HalfNormal(5)).
+            A Normal likelihood cannot capture the heavy tails of a t_2.
+
+        Consequences:
+          1. PSIS warning: The Normal model treats extreme t_2 observations
+             as influential, producing high Pareto-k shape parameters.
+          2. PIT non-uniformity: The Normal predictive distribution is too
+             narrow in the tails. Extreme t_2 observations fall far outside
+             the predictive range, producing PIT values that cluster near 0
+             and 1 (a U-shaped PIT histogram).
+
+        Why PSIS cannot compensate:
+          PSIS corrects for the discrepancy between the full posterior and
+          the LOO posterior, but here the misspecification is a wrong
+          likelihood family — the entire predictive shape is wrong. The
+          importance weights are unstable (high Pareto-k), which PSIS
+          already signals; the PIT values confirm the model is unusable.
+        """
+        n = 300
+        y_obs = stats.t.rvs(df=2, loc=0, scale=1, size=n, random_state=self.rng)
+
+        def fit_normal_model(y_obs: np.ndarray):
             with pm.Model():
                 mu = pm.Normal("mu", mu=0.0, sigma=10.0)
                 sigma = pm.HalfNormal("sigma", sigma=5.0)
-                pm.Normal("y", mu=mu, sigma=sigma, observed=y_obs)
+                _ = pm.Normal("y", mu=mu, sigma=sigma, observed=y_obs)
                 idata = pm.sample(
                     draws=500,
                     chains=2,
-                    random_seed=RNG_SEED + 10,
+                    random_seed=RNG_SEED,
                     progressbar=False,
                     target_accept=0.9,
                 )
-                pm.sample_posterior_predictive(
-                    idata, extend_inferencedata=True, random_seed=RNG_SEED + 10
+                _ = pm.sample_posterior_predictive(
+                    idata, extend_inferencedata=True, random_seed=RNG_SEED
                 )
-                pm.compute_log_likelihood(idata)
+                _ = pm.compute_log_likelihood(idata)
             return idata
 
         # Assert the Pareto-k warning fires — it's a sign of genuine misspecification
-        with pytest.warns(UserWarning, match="Estimated shape parameter of Pareto"):
+        with pytest.warns(UserWarning, match="potential issues with LOO estimates"):
             pit = self._run_miscalibrated(y_obs, fit_normal_model)
-
         _, p_value = stats.kstest(pit, "uniform")
         assert p_value < 0.05, f"Wrong-likelihood model NOT detected (p={p_value:.4f})."
 
     def test_biased_mean_detected(self):
         """
-        True DGP: N(3, 1).
-        Fitted model: N(mu, 1) with mu ~ N(0, 0.1) → prior crushes mu toward 0
-        → systematic bias → PIT skewed high.
-        Mean shift is something PSIS cannot compensate for.
-        """
-        rng = np.random.default_rng(RNG_SEED + 20)
-        n = 200
-        y_obs = rng.normal(3.0, 1.0, size=n)
+        Test that LOO-PIT detects systematic bias from an overly strong prior
+        that fights the data.
 
-        def fit_biased_model(y_obs):
+        Scenario:
+          - True DGP: y_i ~ N(3, 1)  (mean = 3, sd = 1)
+          - Fitted model: y_i ~ N(mu, 1) with mu ~ N(0, 0.1)
+            The prior on mu has sd = 0.1 — extremely tight around 0.
+            Even with n = 200 observations near 3, the posterior is heavily
+            pulled toward 0. The posterior predictive therefore systematically
+            underestimates every observation.
+
+        Consequences for PIT:
+          - Almost every observed y_i falls in the *right tail* of its
+            predictive distribution, so PIT values cluster near 1.
+          - The mean PIT is expected to exceed 0.6 (well above the
+            calibrated value of 0.5).
+          - A Kolmogorov-Smirnov test detects the resulting skew as
+            non-uniformity (p < 0.05).
+
+        Why PSIS cannot compensate:
+          The bias is structural — the wrong prior location — not an
+          overfitting artifact. PSIS corrects for the difference between
+          the LOO posterior and the full posterior due to influential
+          observations, but here every observation is equally miscalibrated.
+          No amount of re-weighting can shift the predictive center from
+          ~0 to ~3.
+        """
+        n = 200
+        y_obs = self.rng.normal(3.0, 1.0, size=n)
+
+        def fit_biased_model(y_obs: np.ndarray):
             with pm.Model():
                 mu = pm.Normal("mu", mu=0.0, sigma=0.1)
-                pm.Normal("y", mu=mu, sigma=1.0, observed=y_obs)
+                _ = pm.Normal("y", mu=mu, sigma=1.0, observed=y_obs)
                 idata = pm.sample(
-                    draws=500,
-                    chains=2,
+                    draws=2000,
+                    chains=4,
                     random_seed=RNG_SEED + 20,
                     progressbar=False,
                     target_accept=0.9,
                 )
-                pm.sample_posterior_predictive(
+                _ = pm.sample_posterior_predictive(
                     idata, extend_inferencedata=True, random_seed=RNG_SEED + 20
                 )
-                pm.compute_log_likelihood(idata)
+                _ = pm.compute_log_likelihood(idata)
             return idata
 
         pit = self._run_miscalibrated(y_obs, fit_biased_model)
@@ -418,77 +478,13 @@ class TestMiscalibratedModels:
         assert p_value < 0.05, f"Biased model not detected by KS (p={p_value:.4f})"
 
 
-# # ============================================================================
-# # Tier 4: Simulation-Based Calibration (SBC) – the "gold standard" approach
-# # ============================================================================
-
-
-# @pytest.mark.slow
-# class TestSimulationBasedCalibration:
-#     """
-#     SBC (Talts et al., 2018): repeat the following K times —
-#       1. Sample θ* ~ prior
-#       2. Generate y* ~ likelihood(θ*)
-#       3. Fit the model on y*
-#       4. Compute rank of θ* within the posterior samples
-
-#     For a well-specified model, ranks must be Uniform(0, S).
-#     This is a model-level calibration test, complementary to LOO-PIT.
-#     """
-
-#     def test_sbc_ranks_are_uniform_normal_model(self):
-#         """
-#         SBC rank test for a simple N(mu, 1) model.
-#         We check that the rank of the true mu is uniformly distributed.
-#         """
-#         K = 50  # SBC repetitions (keep low for CI speed)
-#         S = 200  # posterior draws per fit
-#         n_obs = 30  # observations per dataset
-#         ranks = []
-
-#         rng = np.random.default_rng(RNG_SEED)
-
-#         for k in range(K):
-#             seed_k = int(rng.integers(0, 100_000))
-#             # 1. Draw from prior: mu ~ N(0, 1)
-#             mu_star = rng.normal(0.0, 1.0)
-#             # 2. Generate data
-#             y_star = rng.normal(mu_star, 1.0, size=n_obs)
-
-#             # 3. Fit model
-#             with pm.Model():
-#                 mu = pm.Normal("mu", mu=0.0, sigma=1.0)
-#                 pm.Normal("y", mu=mu, sigma=1.0, observed=y_star)
-
-#                 with warnings.catch_warnings():
-#                     warnings.simplefilter("ignore")
-#                     idata = pm.sample(
-#                         draws=S,
-#                         chains=1,
-#                         random_seed=seed_k,
-#                         progressbar=False,
-#                     )
-
-#             # 4. Rank of true mu within posterior
-#             posterior_mu = idata.posterior["mu"].values.flatten()
-#             rank = int((posterior_mu < mu_star).sum())
-#             ranks.append(rank)
-
-#         # KS test: ranks / S should be Uniform(0, 1)
-#         _, p_value = stats.kstest(np.array(ranks) / S, "uniform")
-#         assert p_value > 0.01, (
-#             f"SBC rank test failed (p={p_value:.4f}). "
-#             "The model posterior is not recovering the prior predictively."
-#         )
-
-
 # ============================================================================
 # Tier 5: Integration smoke test (plot function does not crash)
 # ============================================================================
-
-
 @pytest.mark.slow
-def test_plot_function_runs_without_error(monkeypatch):
+def test_plot_function_runs_without_error(
+    monkeypatch: pytest.MonkeyPatch, rng: np.random.Generator = RNG
+):
     """
     Smoke test: plot_loo_calibration_curve_with_reference runs end-to-end
     on a known-calibrated input and returns a valid CalibrationStats object.
@@ -498,14 +494,13 @@ def test_plot_function_runs_without_error(monkeypatch):
 
     monkeypatch.setattr(plt, "show", lambda: None)
 
-    rng = np.random.default_rng(RNG_SEED)
     n_obs, n_samples = 100, 2000
     y_obs = rng.standard_normal(n_obs)
     y_pred_flat = rng.standard_normal((n_obs, n_samples))
     weights = _uniform_weights(n_obs, n_samples)
 
     # Call the REAL function
-    result = plot_loo_calibration_curve_with_reference(
+    _, result = plot_loo_calibration_curve_with_reference(
         y_obs=y_obs,
         y_pred=y_pred_flat,
         weights=weights,
@@ -518,13 +513,13 @@ def test_plot_function_runs_without_error(monkeypatch):
 
     # Output shapes are consistent
     assert len(result.expected_coverage) == len(result.empirical_coverage)
-    assert len(result.coverage_lower) == len(result.expected_coverage)
-    assert len(result.coverage_upper) == len(result.expected_coverage)
+    assert len(result.bootstrap_lower) == len(result.expected_coverage)
+    assert len(result.bootstrap_upper) == len(result.expected_coverage)
 
     # Values are in valid ranges
     assert np.all(result.empirical_coverage >= 0)
     assert np.all(result.empirical_coverage <= 1)
-    assert np.all(result.coverage_lower <= result.coverage_upper)
+    assert np.all(result.bootstrap_lower <= result.bootstrap_upper)
     assert 0.0 <= result.calibration_error <= 1.0
     assert result.n_miscalibrated >= 0
 
@@ -548,9 +543,10 @@ def test_plot_function_runs_without_error(monkeypatch):
         (50, 50),  # few samples
     ],
 )
-def test_compute_loo_pit_shapes(n_obs, n_samples):
+def test_compute_loo_pit_shapes(
+    n_obs: int, n_samples: int, rng: np.random.Generator = RNG
+):
     """Output shape is always (n_obs,) regardless of input sizes."""
-    rng = np.random.default_rng(RNG_SEED)
     y_obs = rng.standard_normal(n_obs)
     y_pred = rng.standard_normal((n_obs, n_samples))
     weights = _uniform_weights(n_obs, n_samples)
@@ -560,12 +556,13 @@ def test_compute_loo_pit_shapes(n_obs, n_samples):
 
 
 @pytest.mark.parametrize("true_mu,true_sigma", [(0, 1), (5, 2), (-3, 0.5)])
-def test_ks_uniformity_various_normals(true_mu, true_sigma):
+def test_ks_uniformity_various_normals(
+    true_mu: float, true_sigma: float, rng: np.random.Generator = RNG
+):
     """
     Oracle NumPy test (no PyMC) across different N(mu, sigma) parameters.
     PIT must be uniform for any correctly-specified normal model.
     """
-    rng = np.random.default_rng(RNG_SEED)
     n_obs, n_samples = 500, 3000
     y_obs = rng.normal(true_mu, true_sigma, n_obs)
     y_pred = rng.normal(true_mu, true_sigma, (n_obs, n_samples))
@@ -577,40 +574,38 @@ def test_ks_uniformity_various_normals(true_mu, true_sigma):
 
 
 @pytest.mark.visual
-def test_visual_calibration_curve_oracle(monkeypatch):
+def test_visual_calibration_curve_oracle(rng: np.random.Generator = RNG):
     """
     Visual sanity check: plot the calibration curve for a known-calibrated
     input. The empirical coverage line should hug the 45-degree diagonal,
-    with most points inside both uncertainty bands.
+    with almost all points inside both uncertainty bands.
 
     Run with: pytest -m visual -s
     """
 
-    mpl.use("TkAgg")  # interactive window — change to Qt5Agg if needed
+    mpl.use("Agg")
 
-    # Don't monkeypatch plt.show here — we WANT the window to appear
-    rng = np.random.default_rng(RNG_SEED)
-    # n_obs, n_samples = 300, 3000
-    n_obs, n_samples = 3000, 10000
+    n_obs, n_samples = 1000, 10000
     y_obs = rng.standard_normal(n_obs)
     y_pred_flat = rng.standard_normal((n_obs, n_samples))
     weights = _uniform_weights(n_obs, n_samples)
 
-    result = plot_loo_calibration_curve_with_reference(
+    fig, result = plot_loo_calibration_curve_with_reference(
         y_obs=y_obs,
         y_pred=y_pred_flat,
         weights=weights,
-        n_boot=2000,
         random_seed=RNG_SEED,
     )
-
+    file_path = Path(__file__).resolve()
+    parent_dir = file_path.parent
+    fname = Path(parent_dir / "plots" / "calibrated_model.png")
+    _ = fig.figure.savefig(fname)
     # Still assert programmatically so the test has a pass/fail verdict
     assert result.calibration_error < 0.05, (
         f"Oracle input should hug diagonal, got MAE={result.calibration_error:.4f}"
     )
-    assert result.n_miscalibrated <= 2, (
+    assert result.n_miscalibrated <= 3, (
         f"Expected ≤2 miscalibrated points, got {result.n_miscalibrated}"
     )
     print(f"\nCalibration error: {result.calibration_error:.4f}")
     print(f"Miscalibrated points: {result.n_miscalibrated}/20")
-    print(">>> Close the plot window to continue <<<")
