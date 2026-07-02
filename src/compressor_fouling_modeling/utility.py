@@ -3182,12 +3182,6 @@ def evaluate_model_elpd(
     return fig, metrics.trouble_obs_indices
 
 
-# def binomial_band(n: int, grid: np.ndarray, alpha: float = 0.05):
-#     lower = stats.binom.ppf(alpha / 2, n, grid) / n
-#     upper = stats.binom.ppf(1 - alpha / 2, n, grid) / n
-#     return lower, upper
-
-
 def null_coverage_band(
     weights: Float64Matrix2D,
     grid: Float64Matrix1D,
@@ -3234,6 +3228,12 @@ def null_coverage_band(
         coverage band at each grid point.
 
     Notes:
+        **Effective Sample Size (ESS)** — derived from the importance-sampling
+        weights via Kish's formula: ``ESS = 1 / Σ w_i²`` (line 3263). Uniform
+        weights give ``ESS ≈ n_samples`` (narrow band), while degenerate
+        weights (one sample carrying all the mass) give ``ESS ≈ 1`` (wide band
+        approaching Uniform(0,1) noise).
+
         Estimation noise for each observation is modelled as ``Beta(ESS * p, ESS
         * (1 - p))`` centered on the true simulated PIT value ``p``, where ESS
         is derived from the IS weights. This matches the variance of a
