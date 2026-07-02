@@ -140,7 +140,7 @@ def _extract_pred_and_weights(
     an ArviZ InferenceData object.
 
     Returns
-        A tupe (y_pred_flat, weights), where y_pred_flat is predictive samples
+        A tuple (y_pred_flat, weights), where y_pred_flat is predictive samples
         of shape (n_obs, n_samples) and weights is normalized PSIS weights of
         shape (n_obs, n_samples).
     """
@@ -485,9 +485,7 @@ class TestCalculateCalibrationError:
         expected = np.array([0.1, 0.5, 0.9])
         empirical = np.array([0.3, 0.3, 0.7])
         err, werr = calculate_calibration_error(expected, empirical)
-        assert abs(err - werr) > 0, (
-            f"Weighted error {werr} should differ from unweighted {err}"
-        )
+        assert err != werr, f"Weighted error {werr} should differ from unweighted {err}"
 
     def test_all_identical_arrays(self):
         """Identical arrays produce zero error regardless of values."""
@@ -556,7 +554,9 @@ class TestCalculateMiscalibratedCoverage:
         bl = np.array([0.22, 0.47, 0.72])
         bu = np.array([0.28, 0.53, 0.78])
         flagged = calculate_miscalibrated_coverage(emp, exp, sl, su, bl, bu)
-        assert not np.any(flagged)
+        assert not np.any(flagged), (
+            "All levels should be calibrated when sampling band contains bootstrap band"
+        )
 
     def test_empirical_far_below_expected(self):
         """When empirical far below expected and bands do not overlap, flag all."""
@@ -691,8 +691,9 @@ class TestOracleNormalModel:
         (coverage levels that are flagged as significantly miscalibrated when
         the model is actually perfect). With 21 coverage levels and alpha=0.05,
         we expect E[X] = 21 * 0.05 = 1.05, so 0-2 is the typical range of false
-        positives by chance. A well-calibrated model should rarely exceeds 3 as
-        binom.cdf(3, 21, 0.05) = 0.98"""
+        positives by chance. A well-calibrated model should rarely exceed 3 as
+        binom.cdf(3, 21, 0.05) = 0.98.
+        """
 
         rng = np.random.default_rng(RNG_SEED)
         pit = oracle_data["pit"]
@@ -876,11 +877,10 @@ class TestMiscalibratedModels:
 def test_plot_function_runs_without_error(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    rng = np.random.default_rng(RNG_SEED)
-    """
-    Smoke test: plot_loo_calibration_curve_with_reference runs end-to-end
+    """Smoke test: plot_loo_calibration_curve_with_reference runs end-to-end
     on a known-calibrated input and returns a valid CalibrationStats object.
     """
+    rng = np.random.default_rng(RNG_SEED)
 
     mpl.use("Agg")
 
@@ -924,14 +924,13 @@ def test_plot_function_runs_without_error(
 
 @pytest.mark.visual
 def test_visual_calibration_curve_oracle():
-    rng = np.random.default_rng(RNG_SEED)
-    """
-    Visual sanity check: plot the calibration curve for a known-calibrated
+    """Visual sanity check: plot the calibration curve for a known-calibrated
     input. The empirical coverage line should hug the 45-degree diagonal,
     with almost all points inside both uncertainty bands.
 
     Run with: pytest -m visual -s
     """
+    rng = np.random.default_rng(RNG_SEED)
 
     mpl.use("Agg")
 
