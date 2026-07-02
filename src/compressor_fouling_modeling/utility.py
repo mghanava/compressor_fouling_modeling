@@ -3470,7 +3470,7 @@ class CalibrationStats:
     n_miscalibrated: np.uint16
 
 
-def _calculate_empirical_coverage(
+def calculate_empirical_coverage(
     loo_pit: Float64Matrix1D, expected_coverage: Float64Matrix1D
 ) -> Float64Matrix1D:
     """Compute empirical coverage at each expected-coverage threshold.
@@ -3486,14 +3486,14 @@ def _calculate_empirical_coverage(
       ```python
       loo_pit = np.array([0.1, 0.4, 0.6, 0.9])
       expected = np.array([0.25, 0.50, 0.75])
-      _calculate_empirical_coverage(loo_pit, expected)
+      calculate_empirical_coverage(loo_pit, expected)
       ```
 
     """
     return np.array([(loo_pit <= q).mean() for q in expected_coverage])
 
 
-def _calculate_calibration_error(
+def calculate_calibration_error(
     expected_coverage: Float64Matrix1D, empirical_coverage: Float64Matrix1D
 ):
     """Evaluate calibration error and variance-weighted calibration error.
@@ -3515,7 +3515,7 @@ def _calculate_calibration_error(
       ```python
       expected = np.array([0.25, 0.50, 0.75])
       empirical = np.array([0.20, 0.55, 0.70])
-      _calculate_calibration_error(expected, empirical)
+      calculate_calibration_error(expected, empirical)
       ```
 
     """
@@ -3535,7 +3535,7 @@ def _calculate_calibration_error(
     return calibration_error, weighted_cal_error
 
 
-def _calculate_miscalibrated_coverage(
+def calculate_miscalibrated_coverage(
     empirical_coverage: Float64Matrix1D,
     expected_coverage: Float64Matrix1D,
     sampling_lower: Float64Matrix1D,
@@ -3567,7 +3567,7 @@ def _calculate_miscalibrated_coverage(
       samp_high = np.array([0.22, 0.58, 0.73])
       boot_low = np.array([0.15, 0.48, 0.65])
       boot_high = np.array([0.26, 0.53, 0.78])
-      _calculate_miscalibrated_coverage(
+      calculate_miscalibrated_coverage(
           empirical, expected, samp_low, samp_high, boot_low, boot_high
       )
       ```
@@ -3618,7 +3618,7 @@ def _compute_calibration_curve_data(
     # compute loo pit values
     loo_pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
     # calculate emprirical coverage values
-    empirical_coverage = _calculate_empirical_coverage(loo_pit, expected_coverage)
+    empirical_coverage = calculate_empirical_coverage(loo_pit, expected_coverage)
     # compute finite-sample uncertainty band
     sampling_lower, sampling_upper = null_coverage_band(
         weights=weights, grid=expected_coverage, rng=rng
@@ -3628,11 +3628,11 @@ def _compute_calibration_curve_data(
         loo_pit, expected_coverage, rng, ci_level=ci_level, B=n_boot
     )
     # calculate calibration error values
-    calibration_error, weighted_cal_error = _calculate_calibration_error(
+    calibration_error, weighted_cal_error = calculate_calibration_error(
         expected_coverage, empirical_coverage
     )
     # find miscalibrated intervals
-    miscalibrated = _calculate_miscalibrated_coverage(
+    miscalibrated = calculate_miscalibrated_coverage(
         empirical_coverage,
         expected_coverage,
         sampling_lower,
