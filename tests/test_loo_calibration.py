@@ -1,5 +1,5 @@
-"""
-Unit tests for plot_loo_calibration_curve_with_reference and compute_loo_pit_model_agnostic.
+""" Unit tests for plot_loo_calibration_curve_with_reference and
+compute_loo_pit_model_agnostic.
 
 Test strategy
 -------------
@@ -22,11 +22,15 @@ Three tiers of tests:
 from __future__ import annotations
 
 from collections.abc import Callable
+import io
 from pathlib import Path
-from typing import TypedDict
+from typing import ClassVar, TypedDict
 
-from arviz_base import extract
+from arviz_base import extract, from_dict
+import arviz_plots as azp
 import matplotlib as mpl
+from matplotlib.figure import Figure
+from matplotlib.gridspec import GridSpec
 import matplotlib.pyplot as plt
 import numpy as np
 import pymc as pm
@@ -46,16 +50,13 @@ from compressor_fouling_modeling.utility import (
     plot_loo_calibration_curve_with_reference,
 )
 
+RNG_SEED = 14
+# avoid shared mutable RNG module-level global to avoid consuming entropy in a
+# sequential run
+# RNG = np.random.default_rng(RNG_SEED)
 Float64Matrix1D = np.ndarray[tuple[int], np.dtype[np.float64]]
 Float64Matrix2D = np.ndarray[tuple[int, int], np.dtype[np.float64]]
-Uint16Matrix1D = np.ndarray[tuple[int], np.dtype[np.uint16]]
-BoolMatrix1D = np.ndarray[tuple[int], np.dtype[np.bool_]]
-# ============================================================================
-# Helpers shared by multiple tests
-# ============================================================================
-
-RNG_SEED = 14
-RNG = np.random.default_rng(RNG_SEED)
+Float64Matrix3D = np.ndarray[tuple[int, int, int], np.dtype[np.float64]]
 
 
 class OracleData(TypedDict):
@@ -63,6 +64,11 @@ class OracleData(TypedDict):
     idata: DataTree
     pit: Float64Matrix1D
     weights: Float64Matrix2D
+
+
+# ============================================================================
+# Helpers shared by multiple tests
+# ============================================================================
 
 
 def _uniform_weights(n_obs: int, n_samples: int) -> Float64Matrix2D:
@@ -76,7 +82,7 @@ def _fit_oracle_normal(
     true_sigma: float = 1.0,
     draws: int = 2000,
     chains: int = 4,
-    rng: np.random.Generator = RNG,
+    rng_seed: int = RNG_SEED,
 ) -> tuple[np.ndarray, DataTree]:
     """
     Oracle normal model: data ~ N(mu, sigma).
@@ -89,6 +95,7 @@ def _fit_oracle_normal(
     y_obs : (n,) observed data
     idata : ArviZ InferenceData with posterior_predictive and log_likelihood
     """
+    rng = np.random.default_rng(rng_seed)
     y_obs = rng.normal(true_mu, true_sigma, size=n)
 
     with pm.Model():
@@ -143,16 +150,15 @@ def _extract_pred_and_weights(
 class TestComputeLooPitAnalytical:
     """Test compute_loo_pit_model_agnostic with analytically known inputs."""
 
-    rng: np.random.Generator = RNG
-
     def test_perfect_uniform_output_for_known_input(self):
         """
         If y_obs[i] is exactly the p-th quantile of the predictive samples,
         then PIT_i ≈ p.  With equal weights and enough samples this must hold.
         """
+        rng = np.random.default_rng(RNG_SEED)
         n_obs, n_samples = 500, 5000
         # Draw predictive samples from N(0,1)
-        y_pred = self.rng.standard_normal((n_obs, n_samples))
+        y_pred = rng.standard_normal((n_obs, n_samples))
         weights = _uniform_weights(n_obs, n_samples)
         # Set y_obs to be the exact theoretical quantiles at evenly-spaced probs
         probs = np.linspace(0.01, 0.99, n_obs)
@@ -164,10 +170,11 @@ class TestComputeLooPitAnalytical:
         np.testing.assert_allclose(pit, probs, atol=0.05)
 
     def test_pit_values_bounded_in_unit_interval(self):
+        rng = np.random.default_rng(RNG_SEED)
         n_obs, n_samples = 100, 1000
-        y_pred = self.rng.standard_normal((n_obs, n_samples))
+        y_pred = rng.standard_normal((n_obs, n_samples))
         weights = _uniform_weights(n_obs, n_samples)
-        y_obs = self.rng.standard_normal(n_obs)
+        y_obs = rng.standard_normal(n_obs)
 
         pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
 
@@ -201,10 +208,11 @@ class TestComputeLooPitAnalytical:
         Simulate an oracle scenario purely in NumPy (no PyMC) and verify that
         the resulting PIT values are statistically uniform.
         """
+        rng = np.random.default_rng(RNG_SEED)
         n_obs, n_samples = 500, 2000
         # True model: N(0, 1).  y_obs drawn from the same model.
-        y_obs = self.rng.standard_normal(n_obs)
-        y_pred = self.rng.standard_normal((n_obs, n_samples))
+        y_obs = rng.standard_normal(n_obs)
+        y_pred = rng.standard_normal((n_obs, n_samples))
         weights = _uniform_weights(n_obs, n_samples)
 
         pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
@@ -222,9 +230,10 @@ class TestComputeLooPitAnalytical:
         If we deliberately shift all y_obs to be far below predictions,
         PIT values cluster near 0, and the KS test must flag this.
         """
+        rng = np.random.default_rng(RNG_SEED)
         n_obs, n_samples = 300, 1000
-        y_pred = self.rng.standard_normal((n_obs, n_samples))  # N(0,1) predictive
-        y_obs = self.rng.normal(-3, 0.1, n_obs)  # obs << predictions → PIT near 0
+        y_pred = rng.standard_normal((n_obs, n_samples))  # N(0,1) predictive
+        y_obs = rng.normal(-3, 0.1, n_obs)  # obs << predictions → PIT near 0
         weights = _uniform_weights(n_obs, n_samples)
 
         pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
@@ -249,8 +258,6 @@ class TestOracleNormalModel:
     These tests deliberately use a moderate n (200) and a loose tolerance
     because with n=200 some random variation is expected.
     """
-
-    rng: np.random.Generator = RNG
 
     @pytest.fixture
     def oracle_data(self) -> OracleData:
@@ -304,17 +311,18 @@ class TestOracleNormalModel:
         positives by chance. A well-calibrated model should rarely exceeds 3 as
         binom.cdf(3, 21, 0.05) = 0.98"""
 
+        rng = np.random.default_rng(RNG_SEED)
         pit = oracle_data["pit"]
         psis_weights = oracle_data["weights"]
         expected_cov = np.array([*np.arange(0.05, 0.96, 0.05).tolist(), 0.99, 1.0])
         empirical_cov = calculate_empirical_coverage(pit, expected_cov)
         # compute finite-sample uncertainty band
         sampling_lower, sampling_upper = null_coverage_band(
-            weights=psis_weights, grid=expected_cov, rng=self.rng
+            weights=psis_weights, grid=expected_cov, rng=rng
         )
         # compute posterior uncertainty
         bootstrap_lower, bootstrap_upper = bayesian_bootstrap_band(
-            pit, expected_cov, self.rng
+            pit, expected_cov, rng
         )
 
         miscalibrated = calculate_miscalibrated_coverage(
@@ -354,8 +362,6 @@ class TestMiscalibratedModels:
     weights cannot correct the calibration.
     """
 
-    rng: np.random.Generator = RNG
-
     def _run_miscalibrated(
         self,
         y_obs: Float64Matrix1D,
@@ -393,8 +399,9 @@ class TestMiscalibratedModels:
           importance weights are unstable (high Pareto-k), which PSIS
           already signals; the PIT values confirm the model is unusable.
         """
+        rng = np.random.default_rng(RNG_SEED)
         n = 300
-        y_obs = stats.t.rvs(df=2, loc=0, scale=1, size=n, random_state=self.rng)
+        y_obs = stats.t.rvs(df=2, loc=0, scale=1, size=n, random_state=rng)
 
         def fit_normal_model(y_obs: np.ndarray):
             with pm.Model():
@@ -449,8 +456,9 @@ class TestMiscalibratedModels:
           No amount of re-weighting can shift the predictive center from
           ~0 to ~3.
         """
+        rng = np.random.default_rng(RNG_SEED)
         n = 200
-        y_obs = self.rng.normal(3.0, 1.0, size=n)
+        y_obs = rng.normal(3.0, 1.0, size=n)
 
         def fit_biased_model(y_obs: np.ndarray):
             with pm.Model():
@@ -479,12 +487,13 @@ class TestMiscalibratedModels:
 
 
 # ============================================================================
-# Tier 5: Integration smoke test (plot function does not crash)
+# Tier 4: Integration smoke test (plot function does not crash)
 # ============================================================================
 @pytest.mark.slow
 def test_plot_function_runs_without_error(
-    monkeypatch: pytest.MonkeyPatch, rng: np.random.Generator = RNG
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    rng = np.random.default_rng(RNG_SEED)
     """
     Smoke test: plot_loo_calibration_curve_with_reference runs end-to-end
     on a known-calibrated input and returns a valid CalibrationStats object.
@@ -530,51 +539,9 @@ def test_plot_function_runs_without_error(
     )
 
 
-# ============================================================================
-# Parametrized edge-case coverage
-# ============================================================================
-
-
-@pytest.mark.parametrize(
-    "n_obs,n_samples",
-    [
-        (10, 500),  # tiny dataset
-        (1000, 500),  # large dataset
-        (50, 50),  # few samples
-    ],
-)
-def test_compute_loo_pit_shapes(
-    n_obs: int, n_samples: int, rng: np.random.Generator = RNG
-):
-    """Output shape is always (n_obs,) regardless of input sizes."""
-    y_obs = rng.standard_normal(n_obs)
-    y_pred = rng.standard_normal((n_obs, n_samples))
-    weights = _uniform_weights(n_obs, n_samples)
-
-    pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
-    assert pit.shape == (n_obs,), f"Expected ({n_obs},), got {pit.shape}"
-
-
-@pytest.mark.parametrize("true_mu,true_sigma", [(0, 1), (5, 2), (-3, 0.5)])
-def test_ks_uniformity_various_normals(
-    true_mu: float, true_sigma: float, rng: np.random.Generator = RNG
-):
-    """
-    Oracle NumPy test (no PyMC) across different N(mu, sigma) parameters.
-    PIT must be uniform for any correctly-specified normal model.
-    """
-    n_obs, n_samples = 500, 3000
-    y_obs = rng.normal(true_mu, true_sigma, n_obs)
-    y_pred = rng.normal(true_mu, true_sigma, (n_obs, n_samples))
-    weights = _uniform_weights(n_obs, n_samples)
-
-    pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
-    _, p = stats.kstest(pit, "uniform")
-    assert p > 0.05, f"KS test failed for N({true_mu}, {true_sigma}): p={p:.4f}"
-
-
 @pytest.mark.visual
-def test_visual_calibration_curve_oracle(rng: np.random.Generator = RNG):
+def test_visual_calibration_curve_oracle():
+    rng = np.random.default_rng(RNG_SEED)
     """
     Visual sanity check: plot the calibration curve for a known-calibrated
     input. The empirical coverage line should hug the 45-degree diagonal,
@@ -609,3 +576,348 @@ def test_visual_calibration_curve_oracle(rng: np.random.Generator = RNG):
     )
     print(f"\nCalibration error: {result.calibration_error:.4f}")
     print(f"Miscalibrated points: {result.n_miscalibrated}/20")
+
+
+# ============================================================================
+# Tier 5: Multi-scenario visual diagnostic grid
+# ============================================================================
+
+
+@pytest.mark.slow
+@pytest.mark.visual
+class TestCalibrationScenarioGrid:
+    """Multi-scenario visual calibration diagnostic grid.
+
+    Generate data from N(0, 1) and construct 5 predictive distributions
+    (calibrated, mean-shifted up/down, scale-wider/narrower). Render a
+    5x6 diagnostic grid with distribution plots, PIT diagnostics, and
+    LOO-PIT calibration curves.
+    """
+
+    N_OBS: int = 130
+    CHAIN: int = 4
+    DRAW: int = 2000
+    N_SAMPLES: int = CHAIN * DRAW
+    MU: float = 0.0
+    SIGMA: float = 1.0
+    observed: Float64Matrix1D = np.random.default_rng(RNG_SEED).normal(
+        loc=MU, scale=SIGMA, size=N_OBS
+    )
+    predictions: ClassVar[dict[str, Float64Matrix3D]] = {}
+    pits: ClassVar[dict[str, Float64Matrix1D]] = {}
+    cal_errors: ClassVar[dict[str, float]] = {}
+
+    def test_comprehensive_visual_comparison(self, monkeypatch: pytest.MonkeyPatch):
+        """Orchestrate scenario generation, assertions, and grid rendering."""
+        mpl.use("Agg")
+        monkeypatch.setattr(plt, "show", lambda: None)
+
+        self._generate_scenarios()
+        self._assert_miscalibration_detected()
+        self._build_composite_figure()
+
+    # ------------------------------------------------------------------
+    # Scenario generation
+    # ------------------------------------------------------------------
+
+    def _generate_scenarios(self):
+        """Build 5 predictive distributions and compute PIT + calibration error."""
+        rng = np.random.default_rng(RNG_SEED)
+
+        for scen_mu, scen_sigma, label in [
+            (self.MU + 1e-6, self.SIGMA, "calibrated"),
+            (self.MU + 0.5, self.SIGMA, "mean_shift_up"),
+            (self.MU - 0.5, self.SIGMA, "mean_shift_down"),
+            (self.MU, self.SIGMA * 2.0, "scale_wider"),
+            (self.MU, self.SIGMA * 0.5, "scale_narrower"),
+        ]:
+            var_name = f"y_{label}"
+            pred = rng.normal(
+                loc=scen_mu,
+                scale=scen_sigma,
+                size=(self.CHAIN, self.DRAW, self.N_OBS),
+            )
+            self.predictions[var_name] = pred
+
+            y_pred_flat: Float64Matrix2D = pred.reshape(-1, self.N_OBS).T
+            weights = _uniform_weights(self.N_OBS, self.N_SAMPLES)
+            self.pits[label] = compute_loo_pit_model_agnostic(
+                self.observed, y_pred_flat, weights
+            )
+
+            _, result = plot_loo_calibration_curve_with_reference(
+                y_obs=self.observed,
+                y_pred=y_pred_flat,
+                weights=weights,
+                n_boot=500,
+                random_seed=RNG_SEED,
+            )
+            self.cal_errors[label] = result.calibration_error
+
+    # ------------------------------------------------------------------
+    # Programmatic assertions
+    # ------------------------------------------------------------------
+
+    def _assert_miscalibration_detected(self):
+        """KS test passes for oracle, fails for miscalibrated models."""
+        _, p_oracle = stats.kstest(self.pits["calibrated"], "uniform")
+        assert p_oracle > 0.05, (
+            f"Calibrated model PIT rejected by KS (p={p_oracle:.4f})"
+        )
+
+        for label in (
+            "mean_shift_up",
+            "mean_shift_down",
+            "scale_wider",
+            "scale_narrower",
+        ):
+            _, p = stats.kstest(self.pits[label], "uniform")
+            assert p < 0.05, (
+                f"Miscalibrated model '{label}' NOT detected by KS (p={p:.4f})"
+            )
+
+        oracle_err = self.cal_errors["calibrated"]
+        assert oracle_err < min(
+            v for k, v in self.cal_errors.items() if k != "calibrated"
+        ), f"Oracle calibration error ({oracle_err:.4f}) should be smallest"
+
+    # ------------------------------------------------------------------
+    # Composite figure (two-pass)
+    # ------------------------------------------------------------------
+
+    def _build_composite_figure(self):
+        """First pass: collect axis limits.  Second pass: render grid."""
+        rng = np.random.default_rng(RNG_SEED)
+        param_labels = [
+            r"$(\mu + 1e-6,\ \sigma)$",
+            r"$(\mu + 0.5,\ \sigma)$",
+            r"$(\mu - 0.5,\ \sigma)$",
+            r"$(\mu,\ 2\sigma)$",
+            r"$(\mu,\ 0.5\sigma)$",
+        ]
+
+        plot_specs: list[tuple[Callable, dict]] = [  # pyright: ignore[reportMissingTypeArgument]
+            (azp.plot_ppc_dist, {}),
+            (azp.plot_ppc_dist, {"kind": "ecdf"}),
+            (
+                azp.plot_ppc_pit,
+                {
+                    "envelope_prob": 0.95,
+                    "stats": {"ecdf_pit": {"n_simulations": 3000, "rng": rng}},
+                },
+            ),
+            (
+                azp.plot_ppc_pit,
+                {
+                    "coverage": True,
+                    "envelope_prob": 0.95,
+                    "stats": {"ecdf_pit": {"n_simulations": 3000, "rng": rng}},
+                },
+            ),
+        ]
+
+        dt_i = from_dict(
+            {
+                "posterior_predictive": self.predictions,
+                "observed_data": dict.fromkeys(self.predictions, self.observed),
+            }
+        )
+        var_names = list(self.predictions.keys())
+
+        x_lim_global, y_lim_global = self._collect_limits(dt_i, var_names, plot_specs)
+        self._render_grid(
+            dt_i, var_names, plot_specs, x_lim_global, y_lim_global, param_labels
+        )
+
+    def _collect_limits(
+        self,
+        dt_i: DataTree,
+        var_names: list[str],
+        plot_specs: list[tuple[Callable, dict]],  # pyright: ignore[reportMissingTypeArgument]
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        """First pass: render plots, record axis limits, close each figure."""
+        x_limits_col12: list[tuple[float, float]] = []
+        y_limits_col34: list[tuple[float, float]] = []
+
+        for var_name in var_names:
+            for col, (plot_fn, plot_kwargs) in enumerate(plot_specs):
+                pc = plot_fn(
+                    dt_i,
+                    var_names=[var_name],
+                    group="posterior_predictive",
+                    figure_kwargs={"figsize": (3.5, 3.5)},
+                    **plot_kwargs,
+                )
+                fig: Figure = pc.viz.ds["figure"].to_numpy().item()
+                ax = fig.axes[0]
+                if col < 2:
+                    x_limits_col12.append(ax.get_xlim())
+                else:
+                    y_limits_col34.append(ax.get_ylim())
+                plt.close(fig)
+
+        x_abs = max(abs(v) for lim in x_limits_col12 for v in lim)
+        y_abs = max(abs(v) for lim in y_limits_col34 for v in lim)
+        return (-x_abs, x_abs), (-y_abs, y_abs)
+
+    def _render_grid(
+        self,
+        dt_i: DataTree,
+        var_names: list[str],
+        plot_specs: list[tuple[Callable, dict]],  # pyright: ignore[reportMissingTypeArgument]
+        x_lim_global: tuple[float, float],
+        y_lim_global: tuple[float, float],
+        param_labels: list[str],
+    ):
+        """Second pass: compose 5x6 grid with unified axis limits."""
+        plt.close("all")
+        fig = plt.figure(figsize=(30, 30))
+        gs = GridSpec(5, 6, figure=fig, width_ratios=[0.8, 1, 1, 1, 1, 1.6])
+        _ = fig.suptitle(
+            rf"$\mu = {self.MU},\ \sigma = {self.SIGMA}$", fontsize=16, x=0.35
+        )
+
+        for row, var_name in enumerate(var_names):
+            self._render_label_cell(fig, gs, row, param_labels[row])
+            self._render_arviz_cells(
+                fig, gs, row, var_name, dt_i, plot_specs, x_lim_global, y_lim_global
+            )
+            self._render_cal_curve_cell(fig, gs, row, var_name)
+
+        plt.tight_layout()
+        fname = (
+            Path(__file__).resolve().parent
+            / "plots"
+            / "calibration_diagnostic_grid.png"
+        )
+        fig.savefig(fname, dpi=150, bbox_inches="tight")
+        plt.close("all")
+
+    @staticmethod
+    def _render_label_cell(fig: Figure, gs: GridSpec, row: int, label: str):
+        """Render a single label cell (column 0 of the grid)."""
+        ax_label = fig.add_subplot(gs[row, 0])
+        _ = ax_label.text(
+            0.5,
+            0.5,
+            label,
+            transform=ax_label.transAxes,
+            fontsize=10,
+            verticalalignment="center",
+            horizontalalignment="center",
+            c="blue",
+        )
+        _ = ax_label.axis("off")
+
+    def _render_arviz_cells(
+        self,
+        fig: Figure,
+        gs: GridSpec,
+        row: int,
+        var_name: str,
+        dt_i: DataTree,
+        plot_specs: list[tuple[Callable, dict]],  # pyright: ignore[reportMissingTypeArgument]
+        x_lim_global: tuple[float, float],
+        y_lim_global: tuple[float, float],
+    ):
+        """Render the 4 arviz-based plot cells (columns 1-4) for one row."""
+        for col in range(4):
+            ax = fig.add_subplot(gs[row, col + 1])
+            plot_fn, plot_kwargs = plot_specs[col]
+            pc = plot_fn(
+                dt_i,
+                var_names=[var_name],
+                group="posterior_predictive",
+                figure_kwargs={"figsize": (3.5, 3.5)},
+                **plot_kwargs,
+            )
+            plot_fig: Figure = pc.viz.ds["figure"].to_numpy().item()
+            xlim = x_lim_global if col < 2 else None
+            ylim = y_lim_global if col >= 2 else None
+            img = self._render_plot_to_img(plot_fig, xlim, ylim)
+            _ = ax.imshow(img)
+            _ = ax.axis("off")
+
+    def _render_cal_curve_cell(
+        self, fig: Figure, gs: GridSpec, row: int, var_name: str
+    ):
+        """Render the LOO-PIT calibration curve (column 5) for one row."""
+        ax_cal = fig.add_subplot(gs[row, 5])
+        y_pred_var: Float64Matrix2D = (
+            self.predictions[var_name].reshape(-1, self.N_OBS).T
+        )
+        var_weights = _uniform_weights(self.N_OBS, self.N_SAMPLES)
+        _ = plot_loo_calibration_curve_with_reference(
+            y_obs=self.observed,
+            y_pred=y_pred_var,
+            weights=var_weights,
+            n_boot=10000,
+            figsize=(3.5, 3.5),
+            random_seed=RNG_SEED,
+            ax=ax_cal,
+        )
+
+    @staticmethod
+    def _render_plot_to_img(
+        fig: Figure,
+        xlim: tuple[float, float] | None = None,
+        ylim: tuple[float, float] | None = None,
+    ) -> np.ndarray:
+        """Save figure to PNG buffer, close it, return image array."""
+        if xlim is not None:
+            _ = fig.axes[0].set_xlim(xlim)
+        if ylim is not None:
+            _ = fig.axes[0].set_ylim(ylim)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+        _ = buf.seek(0)
+        img = plt.imread(buf)
+        plt.close(fig)
+        return img
+
+
+# ============================================================================
+# Parametrized edge-case coverage
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "n_obs,n_samples",
+    [
+        (10, 500),  # tiny dataset
+        (1000, 500),  # large dataset
+        (50, 50),  # few samples
+    ],
+)
+def test_compute_loo_pit_shapes(
+    n_obs: int,
+    n_samples: int,
+):
+    """Output shape is always (n_obs,) regardless of input sizes."""
+    rng = np.random.default_rng(RNG_SEED)
+    y_obs = rng.standard_normal(n_obs)
+    y_pred = rng.standard_normal((n_obs, n_samples))
+    weights = _uniform_weights(n_obs, n_samples)
+
+    pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
+    assert pit.shape == (n_obs,), f"Expected ({n_obs},), got {pit.shape}"
+
+
+@pytest.mark.parametrize("true_mu,true_sigma", [(0, 1), (5, 2), (-3, 0.5)])
+def test_ks_uniformity_various_normals(
+    true_mu: float,
+    true_sigma: float,
+):
+    """
+    Oracle NumPy test (no PyMC) across different N(mu, sigma) parameters.
+    PIT must be uniform for any correctly-specified normal model.
+    """
+    rng = np.random.default_rng(RNG_SEED)
+    n_obs, n_samples = 500, 3000
+    y_obs = rng.normal(true_mu, true_sigma, n_obs)
+    y_pred = rng.normal(true_mu, true_sigma, (n_obs, n_samples))
+    weights = _uniform_weights(n_obs, n_samples)
+
+    pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
+    _, p = stats.kstest(pit, "uniform")
+    assert p > 0.05, f"KS test failed for N({true_mu}, {true_sigma}): p={p:.4f}"
