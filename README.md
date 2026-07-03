@@ -51,7 +51,7 @@ The project explores two complementary approaches:
 - Configurable priors: Normal or Laplace (sparse)
 - Hierarchical or non-hierarchical noise, intercept, and coefficient structures
 - Normal or Student-T likelihoods (robust to outliers)
-- JAX-backed NUTS sampling via **Nutpie** for fast MCMC
+- NUTS sampling via **Nutpie** for fast MCMC
 - Model comparison via ELPD (Pareto-smoothed importance sampling LOO)
 
 ### Anomaly Detection
@@ -236,7 +236,7 @@ from compressor_fouling_modeling.utility import (
 | Package | Purpose |
 |---------|---------|
 | `pymc` | Bayesian statistical modeling and MCMC sampling |
-| `nutpie` | JAX-backed NUTS sampler (faster than default PyMC) |
+| `nutpie` | NUTS sampler |
 | `jax` / `jaxtyping` | GPU-accelerated linear algebra |
 | `arviz-base` / `arviz-plots` / `arviz-stats` | Bayesian workflow tools (ELPD, LOO, diagnostics) |
 | `optuna` | Hyperparameter optimization for ML models |
