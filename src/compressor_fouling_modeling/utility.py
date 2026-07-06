@@ -4848,7 +4848,7 @@ def _print_diagnostics(
     print("📖 INTERPRETATION:")
     print("=" * 75)
     print(f"""
-    Your model has R² = {r2_overall:.1%} overall, but low within-setpoint R².
+    The model has R² = {r2_overall:.1%} overall, but low within-setpoint R².
 
     This is EXPECTED and CORRECT because:
 
@@ -5218,7 +5218,7 @@ def _plot_residuals(
     _ = ax.set_ylabel("Residual", fontsize=12)
     _ = ax.set_title("Residuals vs Fitted Values", fontsize=14, fontweight="bold")
 
-    # Legend with your preferred settings
+    # Legend with preferred settings
     _ = ax.legend(
         loc="center left",
         bbox_to_anchor=(1, 0.5),
