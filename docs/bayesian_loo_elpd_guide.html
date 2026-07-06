@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bayesian LOO Diagnostics and ELPD Guide</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.7;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem;
+            color: #333;
+            background-color: #fafafa;
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 0.5rem;
+        }
+        h2 {
+            color: #34495e;
+            margin-top: 2rem;
+            border-left: 4px solid #3498db;
+            padding-left: 0.75rem;
+        }
+        h3 {
+            color: #555;
+        }
+        .math-block {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            margin: 1rem 0;
+            overflow-x: auto;
+        }
+        .key-result {
+            background: #e8f4f8;
+            border-left: 4px solid #2980b9;
+            padding: 1rem 1.5rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .warning {
+            background: #fef3e2;
+            border-left: 4px solid #f39c12;
+            padding: 1rem 1.5rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            background: white;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 0.75rem;
+            text-align: left;
+        }
+        th {
+            background: #3498db;
+            color: white;
+        }
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+        .formula {
+            font-family: 'Cambria Math', 'Times New Roman', serif;
+            font-style: italic;
+        }
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Consolas', monospace;
+        }
+        .section-intro {
+            font-size: 1.05rem;
+            color: #555;
+        }
+        hr {
+            border: none;
+            border-top: 1px solid #eee;
+            margin: 2rem 0;
+        }
+        .quick-ref {
+            background: #2c3e50;
+            color: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin: 1.5rem 0;
+        }
+        .quick-ref h3 {
+            color: #ecf0f1;
+            margin-top: 0;
+        }
+        .quick-ref table th {
+            background: #34495e;
+        }
+    </style>
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']]
+            }
+        };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+
+<h1>Bayesian LOO Diagnostics and Expected Log Pointwise Predictive Density (ELPD)</h1>
+
+<p class="section-intro">
+This guide explains how to evaluate Bayesian model predictive performance using Leave-One-Out cross-validation (LOO-CV) and the Expected Log Pointwise Predictive Density (ELPD). It covers both the theoretical foundations and practical diagnostic checks for model calibration.
+</p>
+
+<hr>
+
+<h2>1. Definition of ELPD-LOO</h2>
+
+<p>The <strong>Expected Log Pointwise Predictive Density</strong> using LOO cross-validation is:</p>
+
+<div class="math-block">
+$$\text{elpd\_loo} = \sum_{i=1}^{n} \log p(y_i \mid y_{-i})$$
+</div>
+
+<p>where:</p>
+<ul>
+    <li>$y_i$ is observation $i$</li>
+    <li>$y_{-i}$ represents all observations <em>except</em> observation $i$</li>
+    <li>$p(y_i \mid y_{-i})$ is the posterior predictive density for $y_i$ when trained on all data except $y_i$</li>
+</ul>
+
+<p>This metric quantifies how well the model predicts held-out observations, providing an estimate of out-of-sample predictive performance.</p>
+
+<hr>
+
+<h2>2. Mathematical Foundations</h2>
+
+<h3>2.1 Normal Likelihood Log-Density</h3>
+
+<p>For a Normal likelihood, the log-density of a single observation is:</p>
+
+<div class="math-block">
+$$\log p(y_i \mid \mu, \sigma) = -\frac{1}{2}\log(2\pi\sigma^2) - \frac{1}{2}\left(\frac{y_i - \mu}{\sigma}\right)^2$$
+</div>
+
+<h3>2.2 Relationship Between ELPD and Model Precision</h3>
+
+<p>For a well-calibrated model with unbiased predictions, the expected log-density simplifies to:</p>
+
+<div class="math-block">
+$$\mathbb{E}[\log p] = -\frac{1}{2}\log(2\pi) - \log(\sigma) - \frac{1}{2} = -0.919 - \log(\sigma) - 0.5$$
+</div>
+
+<p>This shows that smaller $\sigma$ (more precise predictions) leads to higher log-likelihood:</p>
+
+<table>
+    <tr><th>$\sigma$</th><th>$\mathbb{E}[\log p]$</th><th>Interpretation</th></tr>
+    <tr><td>1.00</td><td>$-1.42$</td><td>Null model (no skill)</td></tr>
+    <tr><td>0.50</td><td>$-0.73$</td><td>Poor predictions</td></tr>
+    <tr><td>0.20</td><td>$+0.19$</td><td>Moderate predictions</td></tr>
+    <tr><td>0.10</td><td>$+0.88$</td><td>Good predictions</td></tr>
+    <tr><td>0.07</td><td>$+1.24$</td><td>Excellent predictions</td></tr>
+    <tr><td>0.05</td><td>$+1.58$</td><td>Very precise predictions</td></tr>
+</table>
+
+<h3>2.3 RMS Standardized Residual from ELPD</h3>
+
+<p>Rearranging in terms of the average LOO log-density, we can back-solve for the root-mean-square (RMS) standardized residual:</p>
+
+<div class="math-block">
+$$\left|\frac{y - \mu}{\sigma}\right|_{\text{RMS}} = \sqrt{2\left(-\frac{1}{2}\log(2\pi\sigma^2) - \overline{\text{loo}}_{\log}\right)}$$
+</div>
+
+<p>For a perfectly calibrated Normal model, the RMS z-score should be close to 1.0.</p>
+
+<hr>
+
+<h2>3. Model Comparison Benchmarks</h2>
+
+<table>
+    <tr><th>Model</th><th>Avg. Log-Likelihood</th><th>Interpretation</th></tr>
+    <tr><td>Random guess</td><td>$-\infty$</td><td>No predictive capability</td></tr>
+    <tr><td>Null model ($\mu=0$, $\sigma=1$)</td><td>$-1.42$</td><td>Baseline (no skill)</td></tr>
+    <tr><td>Our fitted model ($\sigma \approx 0.07$)</td><td>$+1.15$</td><td>Excellent predictions</td></tr>
+    <tr><td>Perfect model ($\sigma \to 0$)</td><td>$+\infty$</td><td>Theoretical limit</td></tr>
+</table>
+
+<div class="key-result">
+    <strong>Key Insight:</strong> The progression from null to fitted model shows: $-\infty \quad \cdots \quad -1.42 \quad \cdots \quad 0 \quad \cdots \quad +1.15 \quad \cdots \quad +\infty$
+</div>
+
+<hr>
+
+<h2>4. Analytical Log-Density Calibration Check</h2>
+
+<h3>4.1 Method</h3>
+
+<p>To visualize calibration, we compute the "ideal" per-observation log-density under perfect calibration (RMS z-score = 1) across all posterior draws of $\sigma$:</p>
+
+<div class="math-block">
+$$\ell_{\text{ideal}}(\sigma) = -\frac{1}{2}\log(2\pi) - \log(\sigma) - \frac{1}{2}$$
+</div>
+
+<p>This yields a distribution of ideal log-densities reflecting posterior uncertainty in $\sigma$. We then overlay the actual average LOO log-density to see where it falls.</p>
+
+<h3>4.2 Interpreting the Calibration Plot</h3>
+
+<table>
+    <tr><th>Observation</th><th>Interpretation</th></tr>
+    <tr><td>LOO log-density (red) slightly left of analytical mean (black)</td><td>Expected: out-of-sample performance marginally worse than in-sample ideal due to LOO penalty</td></tr>
+    <tr><td>LOO log-density within bulk of analytical distribution</td><td>Observed performance consistent with posterior uncertainty under perfect calibration</td></tr>
+    <tr><td>RMS z-score ≈ 1.0</td><td>Model is neither overconfident nor underconfident</td></tr>
+</table>
+
+<hr>
+
+<h2>5. Pointwise ELPD Analysis</h2>
+
+<h3>5.1 Exponentiating to Density Scale</h3>
+
+<p>For individual observations, we exponentiate the pointwise LOO log-densities:</p>
+
+<div class="math-block">
+$$p(y_i \mid y_{-i}) = \exp(\text{elpd}_i)$$
+</div>
+
+<h3>5.2 Reference Lines</h3>
+
+<ul>
+    <li><strong>Geometric mean LOO density</strong> ($\exp(\overline{\text{elpd}})$): Actual average out-of-sample performance</li>
+    <li><strong>Expected density under perfect calibration</strong>: Theoretical density if every observation had RMS z-score = 1.0</li>
+    <li>The gap between these represents the <strong>out-of-sample prediction penalty</strong></li>
+</ul>
+
+<h3>5.3 Interpreting Pointwise Scatter</h3>
+
+<table>
+    <tr><th>Position</th><th>Meaning</th></tr>
+    <tr><td>Above reference lines</td><td>Observation easy to predict ($|z| < 1$)</td></tr>
+    <tr><td>Near reference lines</td><td>About as surprising as a typical Normal draw</td></tr>
+    <tr><td>Below reference lines</td><td>Observation hard to predict ($|z| > 1$)</td></tr>
+</table>
+
+<h3>5.4 Expected Distribution of z-scores</h3>
+
+<p>Even for a perfectly calibrated model:</p>
+<ul>
+    <li>~38% of observations: $|z| < 0.5$ → high density (above lines)</li>
+    <li>~30%: $0.5 < |z| < 1.0$ → near the lines</li>
+    <li>~24%: $1.0 < |z| < 2.0$ → below the lines</li>
+    <li>~8%: $|z| > 2.0$ → well below the lines</li>
+</ul>
+
+<hr>
+
+<h2>6. Diagnostic Checklist</h2>
+
+<table>
+    <tr><th>Pattern</th><th>Concern</th></tr>
+    <tr><td>Points below line concentrated at specific values</td><td>Model misspecification in those regions</td></tr>
+    <tr><td>More low-density outliers than expected ~8%</td><td>Heavier tails than Normal likelihood assumes</td></tr>
+    <tr><td>Too little spread (all points on line)</td><td>Possible overfitting or overly flexible model</td></tr>
+    <tr><td>Systematic trend with observed value</td><td>Miscalibration in certain regions of outcome space</td></tr>
+</table>
+
+<hr>
+
+<h2>7. Effective Number of Parameters</h2>
+
+<p>The $p_{\text{loo}}$ represents the <strong>effective number of parameters</strong>, accounting for:</p>
+<ul>
+    <li>The actual number of parameters</li>
+    <li>The degree to which priors constrain the posterior</li>
+    <li>The effective complexity used to fit the data</li>
+</ul>
+
+<div class="key-result">
+    <strong>Rule of thumb:</strong> Observations per parameter $= n / p_{\text{loo}} \gtrsim 5$ indicates sufficient data to support model complexity.
+</div>
+
+<hr>
+
+<h2>8. Pareto $k$ Diagnostics</h2>
+
+<p>The reliability of the LOO estimate is assessed using Pareto $k$ diagnostics:</p>
+
+<table>
+    <tr><th>Range</th><th>Status</th><th>Interpretation</th></tr>
+    <tr><td>$k \leq 0.70$</td><td>Good</td><td>LOO approximation reliable</td></tr>
+    <tr><td>$0.70 < k \leq 1.00$</td><td>Bad</td><td>Potentially influential point; investigate</td></tr>
+    <tr><td>$k > 1.00$</td><td>Very Bad</td><td>LOO approximation unreliable for this point</td></tr>
+</table>
+
+<div class="warning">
+    <strong>Note:</strong> With 98%+ observations having $k \leq 0.70$, the overall LOO estimate is considered reliable.
+</div>
+
+<hr>
+
+<h2>9. Interpretation Guide</h2>
+
+<table>
+    <tr><th>RMS Z-Score</th><th>LOO vs. Analytical</th><th>Pointwise Pattern</th><th>Interpretation</th></tr>
+    <tr><td>≈ 1.0</td><td>Red line near black line</td><td>Symmetric scatter, few outliers</td><td>Well-calibrated model</td></tr>
+    <tr><td>≫ 1.0</td><td>Red line far left of distribution</td><td>Many points below the line</td><td>Overconfident or misspecified</td></tr>
+    <tr><td>≪ 1.0</td><td>Red line far right of distribution</td><td>Most points above the line</td><td>Underconfident (overly wide predictions)</td></tr>
+</table>
+
+<hr>
+
+<div class="quick-ref">
+    <h3>Quick Reference Card</h3>
+    
+    <p><strong>Definition:</strong> $\text{elpd\_loo} = \sum_{i=1}^{n} \log p(y_i \mid y_{-i})$</p>
+    
+    <p><strong>Interpretation:</strong></p>
+    <ul>
+        <li>Higher values = better predictive performance</li>
+        <li>Positive values = better than null model</li>
+        <li>Per-observation: divide by $n$ for average</li>
+    </ul>
+    
+    <p><strong>For Normal likelihood with residual std $\sigma$:</strong></p>
+    <div class="math-block" style="background: #34495e; color: white; border: none;">
+    $$\mathbb{E}[\log p] \approx -0.919 - \log(\sigma) - 0.5$$
+    </div>
+    
+    <p><strong>Calibration Check:</strong></p>
+    <ul>
+        <li>RMS z-score ≈ 1.0 → Well-calibrated</li>
+        <li>LOO log-density within analytical distribution → Consistent performance</li>
+        <li>98%+ Pareto $k \leq 0.70$ → Reliable estimate</li>
+    </ul>
+</div>
+
+<hr>
+
+<h2>10. Conclusion</h2>
+
+<p>All diagnostics converge on the same finding: a <strong>well-calibrated Bayesian model</strong> should show:</p>
+
+<ol>
+    <li><strong>RMS z-score ≈ 1.0</strong> — Predictive distributions neither too narrow nor too wide</li>
+    <li><strong>LOO log-density within analytical distribution</strong> — Out-of-sample performance consistent with posterior uncertainty</li>
+    <li><strong>Homogeneous pointwise scatter</strong> — No systematic miscalibration across observed values</li>
+    <li><strong>98%+ Pareto $k \leq 0.70$</strong> — LOO approximation reliable</li>
+</ol>
+
+<p>The leave-one-out predictive performance should closely match the analytically expected log-density, with only a minor and expected out-of-sample penalty.</p>
+
+</body>
+</html>
