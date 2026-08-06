@@ -13,16 +13,16 @@ from enum import Enum
 import io
 from itertools import groupby
 from typing import Any, Literal, TypedDict, cast
-import warnings
 
-from arviz_base import extract
+from arviz_base import convert_to_datatree, extract
 import arviz_plots as azp
 from arviz_plots.plot_collection import PlotCollection
-from arviz_stats import ELPDData
-from arviz_stats.base.array import array_stats
-from arviz_stats.loo import compare
+from arviz_plots.plots.ecdf_plot import plot_ecdf_pit
+from arviz_stats.loo import compare, loo_pit
+from arviz_stats.loo.loo import loo
 from arviz_stats.loo.loo_expectations import loo_metrics, loo_r2
 from arviz_stats.metrics import bayesian_r2, metrics as azs_metrics, residual_r2
+from arviz_stats.utils import ELPDData
 from arviz_stats.visualization import hdi
 from IPython.display import display
 from jax import Array, vmap
@@ -42,7 +42,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import pymc as pm
 from pymc.initial_point import StartDict
-from pymc.variational.opvi import DataArray
 import pytensor.tensor as pt
 from pytensor.tensor.sharedvar import TensorSharedVariable
 from pytensor.tensor.variable import TensorVariable
@@ -56,11 +55,12 @@ from sklearn.model_selection import LearningCurveDisplay, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import SplineTransformer, StandardScaler
 import xarray as xr
-from xarray import DataTree
+from xarray import DataArray, Dataset, DataTree
 from xarray_einstats.stats import XrContinuousRV
 
 Float64Matrix1D = np.ndarray[tuple[int], np.dtype[np.float64]]
 Float64Matrix2D = np.ndarray[tuple[int, int], np.dtype[np.float64]]
+Float64Matrix3D = np.ndarray[tuple[int, int, int], np.dtype[np.float64]]
 Uint16Matrix1D = np.ndarray[tuple[int], np.dtype[np.uint16]]
 BoolMatrix1D = np.ndarray[tuple[int], np.dtype[np.bool_]]
 
@@ -86,15 +86,16 @@ class HierarchicalModelParams(TypedDict):
 
 
 class CalibrationCurveParams(TypedDict):
-    expected_coverage: Float64Matrix1D
-    empirical_coverage: Float64Matrix1D
-    sampling_lower: Float64Matrix1D
-    sampling_upper: Float64Matrix1D
-    bootstrap_lower: Float64Matrix1D
-    bootstrap_upper: Float64Matrix1D
+    loo_pit: DataArray
+    expected_coverage: DataArray
+    empirical_coverage: DataArray
+    sampling_lower: DataArray
+    sampling_upper: DataArray
+    bootstrap_lower: DataArray
+    bootstrap_upper: DataArray
     calibration_error: np.float64
     weighted_cal_error: np.float64
-    miscalibrated: BoolMatrix1D
+    miscalibrated: DataArray
     n_miscalibrated: np.uint16
     n_obs: int
 
@@ -1902,12 +1903,13 @@ def _sample_and_build_idata(
         # prior predictive
         prior = pm.sample_prior_predictive(draws=draws, random_seed=rng)
         # DataTree uses update() not extend()
-        idata.update(prior)  # type: ignore[basedpyright reportAttributeAccessIssue]
+        idata.update(prior)
         # posterior predictive
-        ppc = pm.sample_posterior_predictive(idata, progressbar=False, random_seed=rng)
-        idata.update(ppc)  # type: ignore[basedpyright reportAttributeAccessIssue]
+        _ = pm.sample_posterior_predictive(
+            idata, extend_inferencedata=True, progressbar=False, random_seed=rng
+        )
         # log likelihood
-        _ = pm.compute_log_likelihood(idata)
+        _ = pm.compute_log_likelihood(idata, progressbar=False)
     return idata
 
 
@@ -2387,6 +2389,23 @@ def _render_pc_to_img(
     return ecdf_img
 
 
+def _create_loo_pit_plot(
+    loo_pit_ds: Dataset,
+    coverage: bool,
+    ci_level: float,
+    figure_size: tuple[int, int],
+):
+    return plot_ecdf_pit(
+        convert_to_datatree(loo_pit_ds, group="loo_pit"),
+        group="loo_pit",
+        sample_dims=loo_pit_ds.dims,
+        method="pot_c",
+        envelope_prob=ci_level,
+        coverage=coverage,
+        figure_kwargs={"figsize": figure_size},
+    )
+
+
 def _compute_predictive_and_marginal_densities(
     idata: DataTree,
     n_samples_to_plot: int,
@@ -2682,7 +2701,6 @@ class MCMCSamples:
     sigma_stacked: DataArray  # (n_samples,)
     y_pred_raw: DataArray  # (chain, draw, obs)
     y_pred_stacked: DataArray  # (obs, n_samples)
-    # y_obs: Float64Matrix1D  # (obs, )
     y_obs: DataArray
     log_likelihood_stacked: Float64Matrix2D  # (n_obs, n_samples)
 
@@ -2769,58 +2787,52 @@ def exctract_pymc_groups_data(idata: DataTree) -> MCMCSamples:
 
 
 def compute_psis_weights(
-    ll: Float64Matrix2D,
-) -> tuple[Float64Matrix2D, Float64Matrix1D]:
-    """Compute PSIS weights to approximate LOO posterior.
+    idata: DataTree,
+) -> tuple[DataArray, DataArray, DataArray, bool]:
+    """Compute PSIS weights to approximate the LOO posterior.
 
-    Computes PSIS weights using the input log-likelihood matrix.
-    It first calculates the Pareto k values and then normalizes the weights for
-    each observation considering numerical stability. The function returns the
-    normalized weights and the Pareto k values.
+    Extracts the pointwise log-likelihood from the DataTree and returns
+    ArviZ's Pareto-smoothed log importance weights, the Pareto-k shape
+    diagnostics, the normalized exponentiated weights, and the LOO warning
+    flag.
+
+    The returned weights are strictly negatively correlated with the raw
+    log-likelihood across posterior samples for a given observation: samples
+    that fit an observation poorly receive high importance weights, while good
+    fits receive low weights. Pass the RAW positive log-likelihood to ArviZ;
+    its accessor negates it internally, so pre-negating the input would
+    double-invert the calculation and corrupt the result. A slight flattening
+    in the upper-left tail of a weight-vs-log-likelihood scatter is expected
+    PSIS behavior, not a bug; see the Pareto Smoothed Weights guide in
+    docs/psis_weights_guide.html for details.
 
     Args:
-        ll: Float64Matrix2D
-            Input log-likelihood matrix with shape (n_obs, n_samples).
+        idata: DataTree containing the model's posterior and `log_likelihood`
+            group.
 
     Returns:
-        tuple[Float64Matrix2D, Float64Matrix1D]
-            A tuple containing:
-            - weights: Normalized PSIS weights with shape (n_obs, n_samples).
-            - pareto_k: Pareto k values with shape (n_obs, ).
+        A tuple (lw_da, pareto_k, weights, warning), where lw_da is the
+        Pareto-smoothed log importance weights, pareto_k is the shape
+        parameter (k-hat) diagnostics for each observation, weights are the
+        normalized exponentiated weights, and warning is the LOO warning flag.
 
     Warns:
-        UserWarning
-            If any Pareto k value exceeds 0.7, indicating potential issues
-            with LOO estimate reliability. A hard assertion is avoided because
-            Pareto-k estimates are sensitive to MCMC sampling variability —
-            a single run can cross the 0.7 threshold randomly. Callers should
-            inspect the returned ``pareto_k`` array for their use case.
+        UserWarning: If any Pareto k value exceeds 0.7, indicating the LOO
+            estimate may be unreliable. This is returned as a flag rather than
+            raised because a single run can cross the 0.7 threshold randomly;
+            callers should inspect the returned ``pareto_k`` array.
+
+    Example:
+        ```python
+        lw_da, pareto_k, weights, warning = compute_psis_weights(idata)
+        pareto_k.to_dataframe().describe()
+        ```
 
     """
-    # Compute PSIS weights (these reweight posterior samples to approximate LOO
-    # posterior)
-    result = array_stats.psislw(-ll)
-    assert result is not None, "psis method has returned None."
-    log_weights, pareto_k = cast(tuple[Float64Matrix2D, Float64Matrix1D], result)
-
-    pareto_k_max = cast(float, np.max(pareto_k))
-    if pareto_k_max > 0.7:
-        warnings.warn(
-            "PSIS Pareto k values indicate potential issues with LOO estimates: "
-            + f"max k = {pareto_k_max:.3f} (threshold = 0.7). "
-            + f"{(pareto_k > 0.7).sum()} of {len(pareto_k)} "
-            + "observations exceed the threshold.",
-            stacklevel=2,
-        )
-    # log_weights shape (n_obs, n_samples) - log weights for each observation
-    # pareto_k shape (n_obs, ) - pareto_k for each observation
-    # Normalize weights for each observation considering numerical stability
-    weights: Float64Matrix2D = np.exp(
-        log_weights - cast(Float64Matrix2D, np.max(log_weights, axis=1, keepdims=True))
-    )
-    weights /= np.sum(weights, axis=1, keepdims=True)  # (n_obs, n_samples)
-
-    return weights, pareto_k
+    elpd_data = cast(ELPDData, loo(idata, pointwise=True))
+    lw_da = elpd_data.log_weights
+    weights = cast(DataArray, cast(object, np.exp(lw_da)))
+    return lw_da, elpd_data.pareto_k, weights, elpd_data.warning
 
 
 @dataclass
@@ -3183,12 +3195,12 @@ def evaluate_model_elpd(
 
 
 def null_coverage_band(
-    weights: Float64Matrix2D,
-    grid: Float64Matrix1D,
+    weights: DataArray,
+    grid: DataArray,
     rng: np.random.Generator,
     ci_level: float = 0.95,
     B: int = 10000,
-) -> tuple[Float64Matrix1D, Float64Matrix1D]:
+) -> tuple[DataArray, DataArray]:
     """Compute a simulation-based null coverage band under perfect calibration.
 
     Simulates what the LOO calibration curve would look like if the model were
@@ -3196,171 +3208,184 @@ def null_coverage_band(
     finite-sample estimation noise in the LOO-PIT values. Observations with
     unstable importance sampling weights (high Pareto-k) contribute wider noise
     via lower effective sample size (ESS), naturally widening the band where
-    LOO-PIT estimates are least reliable.
+    LOO-PIT estimates are least reliable. This serves as the reference band in
+    the calibration plot: if the empirical coverage curve falls outside it,
+    the deviation cannot be explained by sampling variation alone.
 
-    This serves as the reference band in the calibration plot: if the empirical
-    coverage curve falls outside this band, it cannot be explained by sampling
-    variation alone.
-
-    This is the Bayesian non-parameteric alternative to frequentist binomial
-    approach:
-    ```python lower = stats.binom.ppf(alpha / 2, n, grid) / n upper =
-    stats.binom.ppf(1 - alpha / 2, n, grid) / n
-    ```
+    The band is a Bayesian non-parametric alternative to the frequentist
+    binomial interval ``stats.binom.ppf``. Estimation noise per observation is
+    modeled as Beta(ESS*p, ESS*(1-p)) centered on the true simulated PIT,
+    where ESS is the Kish effective sample size derived from the importance
+    weights: uniform weights give ESS ≈ n_samples and a narrow band, while
+    degenerate weights give ESS ≈ 1 and a band approaching Uniform(0, 1) noise.
+    Beta is the natural choice here: it lives on [0, 1], suits an uncertain
+    probability estimate, and its concentration a + b = ESS directly controls
+    how tightly the noise clusters around the true PIT.
 
     Args:
-        weights: Normalized Importance sampling weights from LOO approximation,
-            one row per observation. Shape ``(n_obs, n_samples)``.
-        grid: Array of expected coverage levels (quantile grid) at which to
-            evaluate the null band. Typically ``np.linspace(0.05, 0.95, 19)``
-            or similar. Shape ``(m,)``.
+        weights: Importance sampling weights from the LOO approximation, as a
+            DataArray with dims (obs, chain, draw). Need not be pre-normalized;
+            weights are renormalized per observation inside this function, so
+            the caller's array is never mutated.
+        grid: Expected coverage levels (quantile grid) at which to evaluate
+            the null band. Typically ``np.linspace(0.05, 0.95, 19)``.
         rng: NumPy random generator instance for reproducibility. Create via
             ``np.random.default_rng(seed)``.
-        ci_level: Coverage level for the null band, e.g. 0.95 produces a 95%
-            band. Defaults to 0.95.
+        ci_level: Coverage level for the null band; 0.95 produces a 95% band.
+            Defaults to 0.95.
         B: Number of simulation draws used to estimate the null band. Higher
             values give smoother bands at the cost of memory and compute.
             Defaults to 10000.
 
     Returns:
-        A tuple ``(lower, upper)`` where each element is an array of shape
-        ``(m,)`` corresponding to the lower and upper bounds of the null
-        coverage band at each grid point.
+        A tuple (lower, upper), where lower and upper are DataArrays with dim
+        ``grid`` (coordinate values equal to the input ``grid``) giving the
+        lower and upper bounds of the null coverage band at each grid point.
 
-    Notes:
-        **Effective Sample Size (ESS)** — derived from the importance-sampling
-        weights via Kish's formula: ``ESS = 1 / Σ w_i²`` (line 3263). Uniform
-        weights give ``ESS ≈ n_samples`` (narrow band), while degenerate
-        weights (one sample carrying all the mass) give ``ESS ≈ 1`` (wide band
-        approaching Uniform(0,1) noise).
-
-        Estimation noise for each observation is modelled as ``Beta(ESS * p, ESS
-        * (1 - p))`` centered on the true simulated PIT value ``p``, where ESS
-        is derived from the IS weights. This matches the variance of a
-        Binomial(ESS, p) estimator (i.e., ``p*(1-p)/ESS``) approximately (i.e.,
-        ``p*(1-p)/(ESS+1)``. For observations with very low ESS (k > 0.7
-        Pareto), the Beta approaches Uniform(0, 1), contributing maximum
-        uncertainty to the band.
-
-        Beta is the natural choice here as it is the conjugate prior for the
-        Bernouli/Binomial and lives on [0, 1] and naturally models uncertainty
-        about a probability. A noisy PIT value is exactly that — an uncertain
-        estimate of something that should be Uniform(0,1). Also, It's
-        parameterizable by a "concentration" — the sum ``a + b = ESS * p + ESS *
-        (1-p) = ESS`` directly controls how tightly the distribution
-        concentrates around ``p``. High ESS → tight; low ESS → diffuse. No other
-        bounded distribution gives this as cleanly.
+    Raises:
+        ValueError: If weights do not have dims (obs, chain, draw), contain
+            negative values (e.g. log_weights passed by mistake), or are not
+            finite.
 
     Example:
-        >>> rng = np.random.default_rng(42)
-        >>> grid = np.linspace(0.05, 0.95, 19)
-        >>> lower, upper = null_coverage_band(weights=is_weights, grid=grid, , rng=rng)
+        ```python
+        rng = np.random.default_rng(42)
+        grid = np.linspace(0.05, 0.95, 19)
+        lower, upper = null_coverage_band(weights, grid, rng)
+        plt.fill_between(grid, lower, upper, alpha=0.2, label="95% null band")
+        ```
 
     """
-    n: int = weights.shape[0]
-    # assure weights are normalized
-    weights /= np.sum(weights, axis=1, keepdims=True)
-    ess = cast(Float64Matrix1D, 1.0 / np.sum(weights**2, axis=1))  # shape (n_obs,)
+    expected_dims = ("obs", "chain", "draw")
+    if weights.dims != expected_dims:
+        raise ValueError(
+            f"Expected weights dimensions {expected_dims}, got {weights.dims}."
+        )
+    if bool((weights < 0).any()):
+        raise ValueError(
+            "Expected non-negative PSIS weights. Did you accidentally pass log_weights?"
+        )
 
-    # True PITs under null: (B, n_obs)
-    true_pit = rng.uniform(0, 1, size=(B, n))
+    if not bool(np.isfinite(weights).all()):
+        raise ValueError("Weights must be finite.")
 
-    # Noisy PIT: Beta(ess*p, ess*(1-p)) centered on true_pit
-    # Beta parameters: (B, n_obs)
-    # Clamp to avoid Beta(0,x) edge cases
-    a = np.clip(ess[None, :] * true_pit, 0.1, None)
-    b = np.clip(ess[None, :] * (1 - true_pit), 0.1, None)
-    noisy_pit = rng.beta(a, b)
+    # Collapse chain/draw into a single sample dim. No .values / axis= needed --
+    # everything downstream stays a labeled DataArray and broadcasts by name.
+    # Per-observation normalization: dividing by a (obs,)-only reduction
+    # broadcasts against (obs, sample) automatically, no axis=1/keepdims needed.
+    w = weights / weights.sum(dim=("chain", "draw"))
 
-    # Coverage curves: (B, m) where m = grid.siz
-    # noisy_pit: (B, n_obs, 1) <= grid: (1, 1, m)
-    curves = cast(
-        Float64Matrix2D, (noisy_pit[:, :, None] <= grid[None, None, :]).mean(axis=1)
-    )  # shape (B, 2)
+    # Kish ESS
+    ess = 1.0 / (w**2).sum(dim=("chain", "draw"))  # dims: (obs,)
+
+    # True PITs under the null: dims (sim, obs). rng.uniform must produce raw
+    # values (no xarray equivalent of a random generator call), but everything
+    # that touches it from here on is dimension-aware.
+    true_pit = DataArray(
+        rng.uniform(0, 1, size=(B, w.sizes["obs"])), dims=("sim", "obs")
+    )
+
+    # Noisy PIT: Beta(ess*p, ess*(1-p)) centered on true_pit Beta parameters:
+    # the `ess` (obs,) broadcasts against `true_pit` (sim, obs) purely by
+    # matching dim names -- no [None, :] needed.
+    # (B, n_obs) Clamp to avoid Beta(0,x) edge cases
+    a = (ess * true_pit).clip(min=0.1)
+    b = (ess * (1 - true_pit)).clip(min=0.1)
+
+    # apply_ufunc aligns a/b by their dims and hands rng.beta plain arrays,
+    # returning the result already labeled with dims (sim, obs).
+    noisy_pit = xr.apply_ufunc(rng.beta, a, b)
+
+    # Coverage curves: comparing (sim, obs) noisy_pit against (grid,) grid
+    # broadcasts to (sim, obs, grid) automatically -- no reshaping needed.
+    curves = (noisy_pit <= grid).mean(dim="obs")  # dims: (sim, grid)
+
     alpha = 1 - ci_level
-    lower = np.percentile(curves, 100 * alpha / 2, axis=0)
-    upper = np.percentile(curves, 100 * (1 - alpha / 2), axis=0)
+    bounds = curves.quantile([alpha / 2, 1 - alpha / 2], dim="sim")
+    lower = bounds.sel(quantile=alpha / 2, drop=True)
+    upper = bounds.sel(quantile=1 - alpha / 2, drop=True)
     return lower, upper
 
 
 def bayesian_bootstrap_band(
-    loo_pit: Float64Matrix1D,
-    grid: Float64Matrix1D,
+    loo_pit: DataArray,
+    grid: DataArray,
     rng: np.random.Generator,
     ci_level: float = 0.95,
     B: int = 10000,
-) -> tuple[Float64Matrix1D, Float64Matrix1D]:
+) -> tuple[DataArray, DataArray]:
     """Compute Bayesian bootstrap uncertainty bands for a LOO calibration curve.
 
-    Estimates posterior uncertainty in the empirical calibration
-    curve using the Bayesian bootstrap (Dirichlet reweighting).
+    Estimates posterior uncertainty in the empirical calibration curve by
+    reweighting observations with random Dirichlet(1, ..., 1) weights instead
+    of uniform (1/n) weights, then taking percentile bands of the resulting
+    bootstrap curves. The band is fully model-agnostic: it only uses the LOO
+    PIT values and makes no assumption about the likelihood family.
+
+    For each bootstrap draw b, the resampled calibration curve is
+
+        F_b(q) = sum_i w_b,i * 1{loo_pit_i <= q},  w_b ~ Dirichlet(1, ..., 1)
+
+    and the returned band is the ci_level-quantile range of F_b across the B
+    draws at each grid point q.
 
     Args:
-        loo_pit : array-like, shape (n,)
-            LOO-PIT values for each observation. These should be computed from
-            the leave-one-out predictive distribution:
-
-                PIT_i = P(y_i^rep <= y_i | y_-i)
-
-            Under perfect calibration, loo_pit ~ Uniform(0,1).
-        grid : array-like, shape (m,)
-            Grid of probability levels (e.g., np.linspace(0.05, 0.95, 19))
-            at which the calibration curve is evaluated.
-        rng : np.random.Generator
-            Random number generator for reproducibility.
-        ci_level : float, default=0.95
-            Confidence level for the uncertainty bands (e.g., 0.95 for 95% bands).
-        B : int, default=10000
-            Number of Bayesian bootstrap draws (Dirichlet resamples).
-            Larger values produce smoother and more stable uncertainty bands.
+        loo_pit: LOO-PIT values for each observation, as a DataArray with
+            dims (obs,). Each value is the cumulative density of the observed
+            point under the leave-one-out predictive distribution; under
+            perfect calibration loo_pit ~ Uniform(0, 1).
+        grid: Probability levels at which to evaluate the calibration curve,
+            e.g. ``np.linspace(0.05, 0.95, 19)``.
+        rng: NumPy random generator instance for reproducibility. Create via
+            ``np.random.default_rng(seed)``.
+        ci_level: Coverage level for the uncertainty bands; 0.95 produces 95%
+            bands. Defaults to 0.95.
+        B: Number of Bayesian bootstrap draws (Dirichlet resamples). Larger
+            values give smoother, more stable bands at the cost of memory and
+            compute. Defaults to 10000.
 
     Returns:
-        A tuple ``(lower, upper)`` where each element is an array of shape
-        ``(m,)`` corresponding to the lower and upper bounds of Bayesian
-        bootsrap band at each grid point.
+        A tuple (lower, upper), where lower and upper are DataArrays with dim
+        ``grid`` (coordinate values equal to the input ``grid``) giving the
+        lower and upper bounds of the Bayesian bootstrap band at each grid
+        point.
 
-    Notes:
-        The empirical calibration curve is:
+    Raises:
+        ValueError: If loo_pit does not have dims (obs,).
 
-            F_hat(q) = (1/n) * sum_i 1{loo_pit_i <= q}
-
-        The Bayesian bootstrap replaces the uniform weights (1/n) with random
-        Dirichlet(1,...,1) weights to propagate uncertainty in the empirical
-        distribution of loo_pit.
-
-        For each bootstrap draw b:
-
-            F_b(q) = sum_i w_b,i * 1{loo_pit_i <= q}
-
-        where w_b ~ Dirichlet(1,...,1).
-
-        The returned bands correspond to the 2.5% and 97.5% quantiles of the
-        bootstrap calibration curves across B draws.
-        This method is fully model-agnostic and does not assume any particular
-        likelihood (Gaussian, Student-t, etc.).
+    Example:
+        ```python
+        rng = np.random.default_rng(42)
+        grid = np.linspace(0.05, 0.95, 19)
+        lower, upper = bayesian_bootstrap_band(loo_pit, grid, rng)
+        plt.fill_between(grid, lower, upper, alpha=0.2, label="95% band")
+        ```
 
     """
-    loo_pit = np.asarray(loo_pit)
-    n = loo_pit.size
+    if loo_pit.dims != ("obs",):
+        raise ValueError(f"loo_pit must have dims (obs,), got {loo_pit.dims}")
+    n = loo_pit.sizes["obs"]
 
     # Step 1: Indicator matrix (m * n) where m = grid.size
     # I[j, i] = 1 if loo_pit[i] <= grid[j]
-    indicator = (loo_pit[None, :] <= grid[:, None]).astype(float)
+    # Indicator: (obs,) <= (grid,) broadcasts to (obs, grid) by dim name alone --
+    # replaces the manual loo_pit[None, :] <= grid[:, None] transpose dance.
+    indicator = (loo_pit <= grid).astype(float)
 
-    # Step 2: Dirichlet weights (B * n)
-    W = rng.dirichlet(np.ones(n), size=B)
+    # Step 2: Dirichlet weights (boot, obs)
+    W = DataArray(rng.dirichlet(np.ones(n), size=B), dims=("boot", "obs"))
 
     # Step 3: Compute all bootstrap curves at once where each element is a
     # weighted sample proportion
     # curves_{b,j} = sum_{i=1}^n w_b,i * 1(PIT_i <= q_j)
     # (B * n) @ (n * m) = (B * m)
-    curves = W @ indicator.T
+    curves = xr.dot(W, indicator, dim="obs")  # dims: (boot, grid)
 
     # Step 4: Percentile bands
     alpha = 1 - ci_level
-    lower = np.percentile(curves, 100 * alpha / 2, axis=0)
-    upper = np.percentile(curves, 100 * (1 - alpha / 2), axis=0)
-
+    bounds = curves.quantile([alpha / 2, 1 - alpha / 2], dim="boot")
+    lower = bounds.sel(quantile=alpha / 2, drop=True)
+    upper = bounds.sel(quantile=1 - alpha / 2, drop=True)
     return lower, upper
 
 
@@ -3413,66 +3438,101 @@ def bayesian_bootstrap_rmse(
 
 
 def compute_loo_pit_model_agnostic(
-    y_obs: Float64Matrix1D, y_pred_flat: Float64Matrix2D, weights: Float64Matrix2D
-) -> Float64Matrix1D:
+    y_obs: DataArray, y_pred: DataArray, weights: DataArray
+) -> DataArray:
     """Compute model-agnostic LOO Probability Integral Transform (PIT) values.
 
-    Computes leave-one-out (LOO) PIT values using importance sampling weights
-    obtained from PSIS-LOO. It is fully model-agnostic and does not assume any
-    specific likelihood (Gaussian, Student-t, etc.).
+    Estimates leave-one-out PIT values for each observation as a weighted
+    empirical CDF of posterior predictive draws, using PSIS-LOO importance
+    weights in place of refitting the model:
+
+        PIT_i = sum_s w_i^(s) * 1{y_i^(s) <= y_i}
+
+    where w_i^(s) are the PSIS weights and y_i^(s) are predictive draws. The
+    approach is fully model-agnostic: it requires no analytic likelihood CDF
+    and makes no distributional assumption (Gaussian, Student-t, etc.).
+    Under a correctly specified model, loo_pit ~ Uniform(0, 1); an S-shaped
+    ECDF of the resulting values suggests under- or over-dispersion, while
+    skewed deviations suggest asymmetric miscalibration.
 
     Args:
-        y_obs: Observed response values, shape (n_obs,).
-        y_pred_flat: Posterior predictive draws for each observation, shape
-            (n_obs, n_samples), flattened across chains and draws. Each row
-            corresponds to one observation and each column to one posterior
-            sample.
-        weights: Normalized PSIS-LOO importance weights, shape (n_obs,
-            n_samples). Each row sums to 1 and approximates p(θ | y_-i) via:
-                w_i^(s) ∝ 1 / p(y_i | θ^(s))
+        y_obs: Observed response values, as a DataArray with dims (obs,).
+        y_pred: Posterior predictive draws, as a DataArray with dims
+            (chain, draw, obs).
+        weights: PSIS-LOO importance weights, as a DataArray with dims
+            (obs, chain, draw), where each row approximates
+            p(theta | y_-i) via w_i^(s) proportional to 1 / p(y_i | theta^(s)).
+            Renormalized per observation inside this function.
 
     Returns:
-        LOO-PIT values for each observation, shape (n_obs,):
-            PIT_i = P(y_i^rep ≤ y_i | y_-i)
-        computed as a weighted empirical CDF of posterior predictive draws.
+        LOO-PIT values for each observation, as a DataArray with dims (obs,).
 
-    Note:
-        For each observation i, the LOO predictive distribution is approximated
-        as a weighted empirical measure:
-            PIT_i = sigma_s w_i^(s) * 1{ y_i^(s) ≤ y_i }
-        where w_i^(s) are PSIS weights and y_i^(s) are predictive draws.
+    Raises:
+        ValueError: If y_obs, y_pred, or weights do not have their expected
+            dims, if weights contain negative values (e.g. log_weights passed
+            by mistake), or if weights are not finite.
 
-        Under correct model specification, loo_pit ~ Uniform(0, 1). Deviations
-        indicate predictive miscalibration: an S-shaped ECDF suggests under- or
-        over-dispersion; skewed deviations suggest asymmetric miscalibration.
-
-        This approach is fully model-agnostic, requires no analytic CDF, and
-        uses PSIS-LOO without refitting the model.
+    Example:
+        ```python
+        loo_pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
+        loo_pit.plot.hist(bins=20)
+        ```
 
     """
-    # assure weights are normalized
-    weights /= np.sum(weights, axis=1, keepdims=True)
-    y_obs_reshaped = y_obs[:, np.newaxis]  # Shape (n_obs, 1)
-    indicators = (y_pred_flat <= y_obs_reshaped).astype(np.uint16)
-    return np.clip(np.sum(weights * indicators, axis=1), 0.0, 1.0)
+    expected_pp_dims = ("chain", "draw", "obs")
+    expected_w_dims = ("obs", "chain", "draw")
+
+    if y_pred.dims != expected_pp_dims:
+        raise ValueError(
+            f"Expected posterior predictive dims {expected_pp_dims}, "
+            + f"got {y_pred.dims}."
+        )
+
+    if weights.dims != expected_w_dims:
+        raise ValueError(
+            f"Expected weights dims {expected_w_dims}, " + f"got {weights.dims}."
+        )
+
+    if y_obs.dims != ("obs",):
+        raise ValueError(f"Expected observed data dims ('obs',), got {y_obs.dims}.")
+
+    if bool((weights < 0).any()):
+        raise ValueError(
+            "Expected non-negative PSIS weights. Did you accidentally pass log_weights?"
+        )
+
+    if not np.isfinite(weights).all():
+        raise ValueError("Weights must be finite.")
+
+    # y_obs, y_pred, and weights must all refer to the same observations in
+    # the same order *before* PIT values are derived from them -- a mismatch
+    # here would corrupt loo_pit itself, which no downstream guard can catch.
+    y_obs, y_pred, weights = xr.align(y_obs, y_pred, weights, join="exact")
+
+    # normalize over chain/draw
+    weights /= weights.sum(dim=("chain", "draw"))
+    indicators = (y_pred.transpose("obs", "chain", "draw") <= y_obs).astype(np.uint8)
+    loo_pit = (weights * indicators).sum(dim=("chain", "draw"))
+    return loo_pit.clip(min=0.0, max=1.0)
 
 
 @dataclass
 class CalibrationStats:
-    expected_coverage: Float64Matrix1D
-    empirical_coverage: Float64Matrix1D
-    bootstrap_lower: Float64Matrix1D
-    bootstrap_upper: Float64Matrix1D
-    reference_lower: Float64Matrix1D
-    reference_upper: Float64Matrix1D
+    loo_pit: DataArray
+    expected_coverage: DataArray
+    empirical_coverage: DataArray
+    bootstrap_lower: DataArray
+    bootstrap_upper: DataArray
+    reference_lower: DataArray
+    reference_upper: DataArray
     calibration_error: np.float64
     weighted_cal_error: np.float64
     n_miscalibrated: np.uint16
 
 
 def calculate_empirical_coverage(
-    loo_pit: Float64Matrix1D, expected_coverage: Float64Matrix1D
-) -> Float64Matrix1D:
+    loo_pit: DataArray, expected_coverage: DataArray
+) -> DataArray:
     """Compute empirical coverage at each expected-coverage threshold.
 
     Args:
@@ -3490,11 +3550,12 @@ def calculate_empirical_coverage(
       ```
 
     """
-    return np.array([(loo_pit <= q).mean() for q in expected_coverage])
+    # (obs,) <= (grid,) broadcasts to (obs, grid) by name -- no [None, :] needed
+    return (loo_pit <= expected_coverage).mean(dim="obs")
 
 
 def calculate_calibration_error(
-    expected_coverage: Float64Matrix1D, empirical_coverage: Float64Matrix1D
+    expected_coverage: DataArray, empirical_coverage: DataArray
 ):
     """Evaluate calibration error and variance-weighted calibration error.
 
@@ -3519,29 +3580,32 @@ def calculate_calibration_error(
       ```
 
     """
-    calibration_error: np.float64 = np.mean(
-        np.abs(empirical_coverage - expected_coverage), dtype=np.float64
+    # Guard: empirical_coverage must correspond to expected_coverage on the
+    # same grid points in the same order -- otherwise deviations below would
+    # silently compare mismatched thresholds.
+    empirical_coverage, expected_coverage = xr.align(
+        empirical_coverage, expected_coverage, join="exact"
     )
+    deviation = abs(empirical_coverage - expected_coverage)
+    calibration_error = np.float64(deviation.mean(dim="grid").values)
+
     # Using Bernoulli variance `p(1-p)` as weights up-weights mid-range coverage
     # levels (near 0.5) where sampling variability is highest, and down-weights
     # extremes.
     variance_weights = expected_coverage * (1 - expected_coverage)
-    weighted_cal_error: np.float64 = cast(
-        np.float64,
-        np.average(
-            np.abs(empirical_coverage - expected_coverage), weights=variance_weights
-        ),
+    weighted_cal_error: np.float64 = np.float64(
+        deviation.weighted(variance_weights).mean(dim="grid").values
     )
     return calibration_error, weighted_cal_error
 
 
 def calculate_miscalibrated_coverage(
-    empirical_coverage: Float64Matrix1D,
-    expected_coverage: Float64Matrix1D,
-    sampling_lower: Float64Matrix1D,
-    sampling_upper: Float64Matrix1D,
-    bootstrap_lower: Float64Matrix1D,
-    bootstrap_upper: Float64Matrix1D,
+    empirical_coverage: DataArray,
+    expected_coverage: DataArray,
+    sampling_lower: DataArray,
+    sampling_upper: DataArray,
+    bootstrap_lower: DataArray,
+    bootstrap_upper: DataArray,
 ):
     """Identify coverage levels where calibration bands do not overlap.
 
@@ -3549,30 +3613,54 @@ def calculate_miscalibrated_coverage(
     bootstrap interval overlap; otherwise it is miscalibrated.
 
     Args:
-      empirical_coverage: Observed coverage at each level.
+      empirical_coverage: Observed coverage at each level, dim (grid,).
       expected_coverage: Nominal coverage at each level.
-      sampling_lower: Lower bound of the sampling uncertainty band.
-      sampling_upper: Upper bound of the sampling uncertainty band.
-      bootstrap_lower: Lower bound of the bootstrap uncertainty band.
-      bootstrap_upper: Upper bound of the bootstrap uncertainty band.
+      sampling_lower: Lower bound of the sampling uncertainty band, dim (grid,).
+      sampling_upper: Upper bound of the sampling uncertainty band, dim (grid,).
+      bootstrap_lower: Lower bound of the bootstrap uncertainty band, dim (grid,).
+      bootstrap_upper: Upper bound of the bootstrap uncertainty band, dim (grid,).
 
     Returns:
-      Boolean array where ``True`` indicates a miscalibrated level.
+        Boolean xarray.DataArray with dim (grid,) where True indicates a
+        miscalibrated level.
 
     Example:
-      ```python
-      empirical = np.array([0.20, 0.55, 0.70])
-      expected = np.array([0.25, 0.50, 0.75])
-      samp_low = np.array([0.18, 0.52, 0.67])
-      samp_high = np.array([0.22, 0.58, 0.73])
-      boot_low = np.array([0.15, 0.48, 0.65])
-      boot_high = np.array([0.26, 0.53, 0.78])
+    ```python
+      grid = xr.DataArray([0.25, 0.50, 0.75],
+        dims="grid",
+        coords={"grid": [0.25, 0.50, 0.75]}
+        )
+      empirical = grid.copy(data=[0.20, 0.55, 0.70])
+      samp_low = grid.copy(data=[0.18, 0.52, 0.67])
+      samp_high = grid.copy(data=[0.22, 0.58, 0.73])
+      boot_low = grid.copy(data=[0.15, 0.48, 0.65])
+      boot_high = grid.copy(data=[0.26, 0.53, 0.78])
       calculate_miscalibrated_coverage(
-          empirical, expected, samp_low, samp_high, boot_low, boot_high
+          empirical, grid, samp_low, samp_high, boot_low, boot_high
       )
-      ```
+    ```
 
     """
+    # Guard: all six inputs must agree on grid labels/order before comparing
+    # elementwise -- with six independently-built arrays this is exactly
+    # where a silent positional mismatch would be easiest to introduce and
+    # hardest to notice (wrong booleans, no crash).
+    (
+        empirical_coverage,
+        expected_coverage,
+        sampling_lower,
+        sampling_upper,
+        bootstrap_lower,
+        bootstrap_upper,
+    ) = xr.align(
+        empirical_coverage,
+        expected_coverage,
+        sampling_lower,
+        sampling_upper,
+        bootstrap_lower,
+        bootstrap_upper,
+        join="exact",
+    )
     calibrated = (
         (empirical_coverage >= expected_coverage) & (sampling_upper >= bootstrap_lower)
     ) | (
@@ -3581,69 +3669,231 @@ def calculate_miscalibrated_coverage(
     return ~calibrated
 
 
+def _resolve_calibration_inputs(
+    idata: DataTree | None,
+    y_obs: DataArray | None,
+    y_pred: DataArray | None,
+    weights: DataArray | None,
+) -> tuple[DataArray, DataArray, DataArray]:
+    """Resolve and validate the calibration inputs from idata or direct args.
+
+    Extracts the observed and posterior predictive arrays for the resolved
+    likelihood variable from idata when given, computes PSIS weights from
+    idata when weights is None, and validates that all three arrays have
+    their expected dimensions.
+
+    Args:
+        idata: DataTree from which y_obs, y_pred, and weights are extracted
+            when not passed directly.
+        y_obs: Observed response values, as a DataArray with dims (obs,).
+        y_pred: Posterior predictive draws, as a DataArray with dims
+            (chain, draw, obs).
+        weights: PSIS-LOO importance weights with dims (obs, chain, draw).
+
+    Returns:
+        A tuple (y_obs, y_pred, weights), each a validated DataArray.
+
+    Raises:
+        ValueError: If the likelihood variable is missing from
+            idata.posterior_predictive, or if y_obs, y_pred, or weights do
+            not have their expected dims.
+
+    Example:
+        ```python
+        y_obs, y_pred, weights = _resolve_calibration_inputs(
+            idata, y_obs, y_pred, weights
+        )
+        ```
+
+    """
+    if weights is None and idata is not None:
+        weights = compute_psis_weights(idata)[2]  # (obs, chain, draw)
+    if idata is not None:
+        var_name = _resolve_likelihood_var_name(idata)
+        if var_name not in idata.posterior_predictive.data_vars:
+            raise ValueError(
+                f"Observed variable {var_name!r} not found in "
+                + "idata.posterior_predictive (has "
+                + f"{list(idata.posterior_predictive.data_vars)})."
+            )
+
+        y_obs = idata.observed_data[var_name]
+        y_pred = idata.posterior_predictive[var_name]  # (chain, draw, obs)
+
+    assert y_obs is not None, "y_obs is not given!"
+    assert y_pred is not None, "posterior draw samples are not given!"
+    assert weights is not None, "PSIS weights are not available!"
+
+    if y_obs.dims != ("obs",):
+        raise ValueError(f"Expected observed data dims ('obs',), got {y_obs.dims}.")
+
+    expected_pp_dims = ("chain", "draw", "obs")
+    if y_pred.dims != expected_pp_dims:
+        raise ValueError(
+            f"posterior_predictive must have dimensions {expected_pp_dims}, "
+            + f"got {y_pred.dims}."
+        )
+
+    expected_w_dims = ("obs", "chain", "draw")
+    if weights.dims != expected_w_dims:
+        raise ValueError(
+            f"weights must have dimensions {expected_w_dims}, got {weights.dims}."
+        )
+    return y_obs, y_pred, weights
+
+
+def _compute_aligned_loo_pit(
+    y_obs: DataArray,
+    y_pred: DataArray,
+    weights: DataArray,
+    loo_pit_value: DataArray | None,
+) -> tuple[DataArray, DataArray]:
+    """Compute LOO-PIT values aligned with the PSIS weights.
+
+    Computes model-agnostic LOO-PIT values from y_obs, y_pred, and weights
+    unless precomputed values are supplied, then aligns the resulting LOO-PIT
+    array with the weights on the observation dimension. The alignment is
+    required because the null coverage band and the Bayesian bootstrap band
+    are computed by independent calls whose inputs must describe the same
+    observations in the same order.
+
+    Args:
+        y_obs: Observed response values, as a DataArray with dims (obs,).
+        y_pred: Posterior predictive draws, as a DataArray with dims
+            (chain, draw, obs).
+        weights: PSIS-LOO importance weights with dims (obs, chain, draw).
+        loo_pit_value: Precomputed LOO-PIT values with dims (obs,); computed
+            from y_obs, y_pred, and weights when None.
+
+    Returns:
+        A tuple (weights, loo_pit), aligned to the same observations.
+
+    Example:
+        ```python
+        weights, loo_pit = _compute_aligned_loo_pit(
+            y_obs, y_pred, weights, loo_pit_value
+        )
+        ```
+
+    """
+    if loo_pit_value is None:
+        # y_obs, y_pred, and weights must all refer to the same observations
+        # in the same order *before* PIT values are derived from them -- a
+        # mismatch here would corrupt loo_pit itself, which no downstream
+        # guard can catch.
+        y_obs, y_pred, weights = xr.align(y_obs, y_pred, weights, join="exact")
+        loo_pit_da = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
+    else:
+        loo_pit_da = loo_pit_value
+
+    # Guard: null_coverage_band(weights=...) and
+    # bayesian_bootstrap_band(loo_pit=...) are independent calls with
+    # independent inputs -- neither can catch weights/ loo_pit describing
+    # different or differently-ordered observations. Covers both the
+    # just-computed loo_pit_da and an externally-supplied loo_pit_value.
+    weights, loo_pit_da = xr.align(weights, loo_pit_da, join="exact")
+    return weights, loo_pit_da
+
+
 def _compute_calibration_curve_data(
-    y_obs: Float64Matrix1D,
-    y_pred: Float64Matrix2D,
-    log_likelihood: Float64Matrix2D | None,
-    weights: Float64Matrix2D | None,
+    *,
+    expected_coverage: Float64Matrix1D,
+    idata: DataTree | None,
+    y_obs: DataArray | None,
+    y_pred: DataArray | None,
+    loo_pit_value: DataArray | None,
+    weights: DataArray | None,
     n_boot: int,
     ci_level: float,
     rng: np.random.Generator,
 ) -> CalibrationCurveParams:
     """Compute LOO calibration curve data, uncertainty bands, and diagnostics.
 
+    Builds the empirical coverage curve from LOO-PIT values and the expected
+    coverage grid, then adds two uncertainty bands: a finite-sample null band
+    (simulated under perfect calibration, accounting for PSIS weight quality)
+    and a Bayesian bootstrap band (posterior uncertainty in the curve itself).
+    Also computes calibration error metrics and flags grid intervals whose
+    empirical coverage deviates from expectation beyond both bands.
+
+    Data may be supplied directly via y_obs, y_pred, and weights, or extracted
+    from idata when only the DataTree is given; PSIS weights are computed from
+    idata via compute_psis_weights() when weights is None.
+
     Args:
-      y_obs: Observed data vector.
-      y_pred: Posterior predictive draws of shape (n_obs, n_samples).
-      log_likelihood: Log-likelihood matrix of shape (n_obs, n_samples).
-      weights: PSIS weights of shape (n_obs, n_samples).
-      n_boot: Number of Bayesian bootstrap replications.
-      ci_level: Credible interval level for bands.
-      rng: NumPy random generator.
+        expected_coverage: Quantile grid at which to evaluate the coverage
+            curve, as a 1D array.
+        idata: DataTree from which y_obs, y_pred, and weights are extracted
+            when not passed directly. Defaults to None.
+        y_obs: Observed response values, as a DataArray with dims (obs,).
+            Defaults to None.
+        y_pred: Posterior predictive draws, as a DataArray with dims
+            (chain, draw, obs). Defaults to None.
+        loo_pit_value: Precomputed LOO-PIT values with dims (obs,); computed
+            from y_obs, y_pred, and weights when None. Defaults to None.
+        weights: PSIS-LOO importance weights with dims (obs, chain, draw);
+            computed from idata when None. Defaults to None.
+        n_boot: Number of Bayesian bootstrap replications for the posterior
+            uncertainty band.
+        ci_level: Coverage level for the uncertainty bands.
+        rng: NumPy random generator instance for reproducibility.
 
     Returns:
-      A dict with keys ``expected_coverage``, ``empirical_coverage``,
-      ``sampling_lower``, ``sampling_upper``, ``bootstrap_lower``,
-      ``bootstrap_upper``, ``calibration_error``, ``weighted_cal_error``,
-      ``miscalibrated``, ``n_miscalibrated``, and ``n_obs``.
+        A CalibrationCurveParams dict with keys loo_pit, expected_coverage,
+        empirical_coverage, sampling_lower, sampling_upper, bootstrap_lower,
+        bootstrap_upper, calibration_error, weighted_cal_error, miscalibrated,
+        n_miscalibrated, and n_obs.
+
+    Example:
+        ```python
+        params = _compute_calibration_curve_data(
+            expected_coverage=grid,
+            idata=idata,
+            n_boot=10000,
+            ci_level=0.95,
+            rng=np.random.default_rng(42),
+        )
+        params["calibration_error"]
+        ```
 
     """
-    expected_coverage: Float64Matrix1D = np.array(
-        [*np.arange(0.05, 0.96, 0.05).tolist(), 0.99, 1.0]
+    expected_coverage_da = DataArray(
+        expected_coverage, dims="grid", coords={"grid": expected_coverage}
     )
 
-    if log_likelihood is not None:
-        weights, _pareto_k = compute_psis_weights(log_likelihood)
-    assert weights is not None, "PSIS weights are not available!"
-    # compute loo pit values
-    loo_pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
+    y_obs, y_pred, weights = _resolve_calibration_inputs(idata, y_obs, y_pred, weights)
+    weights, loo_pit_da = _compute_aligned_loo_pit(
+        y_obs, y_pred, weights, loo_pit_value
+    )
+
     # calculate emprirical coverage values
-    empirical_coverage = calculate_empirical_coverage(loo_pit, expected_coverage)
+    empirical_coverage = calculate_empirical_coverage(loo_pit_da, expected_coverage_da)
     # compute finite-sample uncertainty band
     sampling_lower, sampling_upper = null_coverage_band(
-        weights=weights, grid=expected_coverage, rng=rng
+        weights=weights, grid=expected_coverage_da, rng=rng
     )
     # compute posterior uncertainty
     bootstrap_lower, bootstrap_upper = bayesian_bootstrap_band(
-        loo_pit, expected_coverage, rng, ci_level=ci_level, B=n_boot
+        loo_pit_da, expected_coverage_da, rng, ci_level=ci_level, B=n_boot
     )
     # calculate calibration error values
     calibration_error, weighted_cal_error = calculate_calibration_error(
-        expected_coverage, empirical_coverage
+        expected_coverage_da, empirical_coverage
     )
     # find miscalibrated intervals
     miscalibrated = calculate_miscalibrated_coverage(
         empirical_coverage,
-        expected_coverage,
+        expected_coverage_da,
         sampling_lower,
         sampling_upper,
         bootstrap_lower,
         bootstrap_upper,
     )
-    n_miscalibrated = np.sum(miscalibrated).astype(np.uint16)
+    n_miscalibrated = np.uint16(miscalibrated.sum().item())
 
     return {
-        "expected_coverage": expected_coverage,
+        "loo_pit": loo_pit_da,
+        "expected_coverage": expected_coverage_da,
         "empirical_coverage": empirical_coverage,
         "sampling_lower": sampling_lower,
         "sampling_upper": sampling_upper,
@@ -3657,12 +3907,19 @@ def _compute_calibration_curve_data(
     }
 
 
+EXPECTED_COVERAGE_DEFAULT: Float64Matrix1D = np.array(
+    [*np.arange(0.05, 0.96, 0.05).tolist(), 0.99, 1.0]
+)
+
+
 def plot_loo_calibration_curve_with_reference(
-    y_obs: Float64Matrix1D,
-    y_pred: Float64Matrix2D,
+    expected_coverage: Float64Matrix1D = EXPECTED_COVERAGE_DEFAULT,
+    idata: DataTree | None = None,
+    y_obs: DataArray | None = None,
+    y_pred: DataArray | None = None,
     *,
-    log_likelihood: Float64Matrix2D | None = None,
-    weights: Float64Matrix2D | None = None,
+    loo_pit_value: DataArray | None = None,
+    weights: DataArray | None = None,
     n_boot: int = 10000,
     ci_level: float = 0.95,
     figsize: tuple[float, float] = (7, 7),
@@ -3675,36 +3932,54 @@ def plot_loo_calibration_curve_with_reference(
     the provided observations and posterior draws, then plots the empirical
     coverage against expected coverage alongside finite-sampling and Bayesian
     bootstrap uncertainty bands. Flagged points indicate significant
-    miscalibration where the diagonal falls outside both uncertainty sources
-    simultaneously.
+    miscalibration where the empirical curve falls outside both uncertainty
+    sources simultaneously.
+
+    Data may be supplied directly via y_obs and y_pred, or extracted from
+    idata; exactly one of the two routes must be given. PSIS weights and
+    LOO-PIT values are computed inside unless precomputed values are passed.
 
     Args:
-        y_obs: Observed data vector of shape (n_obs,).
-        y_pred: Posterior predictive draws of shape (n_obs, n_samples).
-        log_likelihood: Log-likelihood matrix of shape (n_obs, n_samples).
-        weights: PSIS weights of shape (n_obs, n_samples).
-        n_boot: Number of Bayesian bootstrap replications. Defaults to 10000.
-        ci_level: Credible interval level for the bootstrap and sampling bands.
+        expected_coverage: Quantile grid at which to evaluate the coverage
+            curve. Defaults to EXPECTED_COVERAGE_DEFAULT (0.05 to 0.95 in
+            0.05 steps plus 0.99 and 1.0).
+        idata: DataTree from which y_obs and y_pred are extracted when not
+            passed directly. Defaults to None.
+        y_obs: Observed response values, as a DataArray with dims (obs,).
+            Defaults to None.
+        y_pred: Posterior predictive draws, as a DataArray with dims
+            (chain, draw, obs). Defaults to None.
+        loo_pit_value: Precomputed LOO-PIT values with dims (obs,); computed
+            from y_obs, y_pred, and weights when None. Defaults to None.
+        weights: PSIS-LOO importance weights with dims (obs, chain, draw);
+            computed from idata when None. Defaults to None.
+        n_boot: Number of Bayesian bootstrap replications for the posterior
+            uncertainty band. Defaults to 10000.
+        ci_level: Coverage level for the bootstrap and sampling bands.
             Defaults to 0.95.
-        figsize: Matplotlib figure size as (width, height). Defaults to (7, 7).
+        figsize: Matplotlib figure size as (width, height). Defaults to
+            (7, 7).
         random_seed: Seed for the random number generator. Defaults to None.
         ax: Matplotlib axes to plot on. If None, a new figure and axes are
             created. Defaults to None.
 
     Returns:
-        A tuple (fig, st), where fig is the matplotlib Figure or SubFigure
-        instance, and stats is a CalibrationStats named tuple containing
-        expected and empirical coverage curves, uncertainty band bounds, and
-        calibration error metrics.
+        A tuple (fig, stats), where fig is the matplotlib Figure or SubFigure
+        instance, and stats is a CalibrationStats dataclass containing the
+        LOO-PIT values, expected and empirical coverage curves, uncertainty
+        band bounds, and calibration error metrics.
+
+    Raises:
+        ValueError: If exactly one of idata or y_obs + y_pred is not
+            provided.
 
     Example:
-        >>> fig, st = plot_loo_calibration_curve_with_reference(
-        ...     y_obs=y_obs,
-        ...     y_pred=y_pred,
-        ...     log_likelihood=log_likelihood,
-        ...     n_boot=5000,
-        ... )
-        >>> print(st.calibration_error)
+        ```python
+        fig, stats = plot_loo_calibration_curve_with_reference(
+            idata=idata, n_boot=5000
+        )
+        stats.calibration_error
+        ```
 
     """
     rng: np.random.Generator = (
@@ -3713,8 +3988,22 @@ def plot_loo_calibration_curve_with_reference(
         else np.random.default_rng()
     )
 
+    has_idata = idata is not None
+    has_arrays = y_obs is not None and y_pred is not None
+
+    if has_idata == has_arrays:  # both True or both False
+        raise ValueError("Provide exactly one of: `idata`, or `y_obs` + `y_pred`.")
+
     d = _compute_calibration_curve_data(
-        y_obs, y_pred, log_likelihood, weights, n_boot, ci_level, rng
+        expected_coverage=expected_coverage,
+        idata=idata,
+        y_obs=y_obs,
+        y_pred=y_pred,
+        loo_pit_value=loo_pit_value,
+        weights=weights,
+        n_boot=n_boot,
+        ci_level=ci_level,
+        rng=rng,
     )
 
     if ax is None:
@@ -3793,6 +4082,7 @@ def plot_loo_calibration_curve_with_reference(
     )
 
     return fig, CalibrationStats(
+        loo_pit=d["loo_pit"],
         expected_coverage=d["expected_coverage"],
         empirical_coverage=d["empirical_coverage"],
         bootstrap_lower=d["bootstrap_lower"],
@@ -3805,82 +4095,73 @@ def plot_loo_calibration_curve_with_reference(
     )
 
 
-def _prepare_calibration_data(
-    idata: DataTree,
-) -> tuple[Float64Matrix1D, Float64Matrix2D, Float64Matrix2D]:
-    """Extract observations, posterior predictive, and PSIS weights from a DataTree.
-
-    Determines the observation dimension automatically, pulls observed
-    data and posterior predictive samples, then computes PSIS importance
-    weights from the log-likelihood.
-
-    Args:
-      idata: ArviZ ``DataTree`` containing ``observed_data``,
-        ``posterior_predictive``, and ``log_likelihood`` groups.
-
-    Returns:
-      A tuple ``(y_obs, y_pred, weights)``, where ``y_obs`` is
-      ``(n_obs,)``, ``y_pred`` is ``(n_obs, n_samples)``, and
-      ``weights`` are normalized PSIS weights ``(n_obs, n_samples)``.
-
-    Example:
-      ```python
-      y_obs, y_pred, weights = _prepare_calibration_data(idata)
-      ```
-
-    """
-    obs_dim = next(iter(idata.observed_data.dims.keys()))
-    y_obs: Float64Matrix1D = extract(
-        idata, group="observed_data", sample_dims=obs_dim
-    ).to_numpy()
-    y_pred: Float64Matrix2D = extract(
-        idata, group="posterior_predictive", combined=True
-    ).to_numpy()
-    log_lik_flat: Float64Matrix2D = extract(
-        idata, group="log_likelihood", combined=True
-    ).to_numpy()
-    return y_obs, y_pred, log_lik_flat
-
-
 def plot_loo_calibration_curves(
     idata: DataTree,
+    expected_coverage: Float64Matrix1D = EXPECTED_COVERAGE_DEFAULT,
+    custom_loo_pit: bool = False,
     random_seed: int | None = None,
     n_boot: int = 10000,
     ci_level: float = 0.95,
 ):
     """Plot a side-by-side LOO-PIT envelope and LOO calibration curve.
 
-    Renders the LOO-PIT QQ plot from ``arviz_plots`` alongside a custom
-    calibration curve with bootstrap and sampling uncertainty bands.
+    Renders the LOO-PIT QQ plot and LOO-PIT ETI coverage plot from
+    ``arviz_plots`` alongside a custom calibration curve with bootstrap and
+    sampling uncertainty bands, and returns the resulting figure plus the
+    computed calibration statistics.
+
+    LOO-PIT values come from ArviZ's ``loo_pit`` routine unless
+    ``custom_loo_pit`` is True, in which case they are recomputed with the
+    model-agnostic ``compute_loo_pit_model_agnostic`` inside the calibration
+    subplot.
 
     Args:
-      idata: ArviZ ``DataTree`` containing ``observed_data``,
-        ``posterior_predictive``, and ``log_likelihood`` groups.
-      random_seed: Seed for reproducible Bayesian bootstrap. Defaults to
-        ``None``.
-      n_boot: Number of Bayesian bootstrap replications. Defaults to
-        ``10000``.
-      ci_level: Credible interval level for uncertainty bands. Defaults
-        to ``0.95``.
+        idata: DataTree containing ``observed_data``, ``posterior_predictive``,
+            and ``log_likelihood`` groups.
+        expected_coverage: Quantile grid at which to evaluate the coverage
+            curve. Defaults to EXPECTED_COVERAGE_DEFAULT (0.05 to 0.95 in
+            0.05 steps plus 0.99 and 1.0).
+        custom_loo_pit: If True, compute LOO-PIT values with the
+            model-agnostic routine instead of ArviZ's. Defaults to False.
+        random_seed: Seed for reproducible Bayesian bootstrap. Defaults to
+            None.
+        n_boot: Number of Bayesian bootstrap replications. Defaults to 10000.
+        ci_level: Credible interval level for the uncertainty bands. Defaults
+            to 0.95.
 
     Returns:
-      A tuple ``(fig, calib_res)``, where ``fig`` is the matplotlib
-      figure and ``calib_res`` is a ``CalibrationStats`` named tuple.
+        A tuple (fig, calib_res), where fig is the matplotlib figure and
+        calib_res is a CalibrationStats dataclass with the calibration
+        statistics.
+
+    Raises:
+        ValueError: If the observed variable is missing from the computed
+            LOO-PIT dataset.
 
     Example:
-      ```python
-      fig, calib = plot_loo_calibration_curves(idata, random_seed=42)
-      ```
+        ```python
+        fig, calib = plot_loo_calibration_curves(idata, random_seed=42)
+        ```
 
     """
-    pc = azp.plot_loo_pit(
-        idata, envelope_prob=ci_level, figure_kwargs={"figsize": (7, 4)}
+    lw_3d_da, pareto_k_da, weights_3d_da, _warn_mg = compute_psis_weights(idata)
+
+    lpv_ds = loo_pit(
+        idata,
+        log_weights=lw_3d_da.to_dataset(),
+        pareto_k=pareto_k_da.to_dataset(),
+        random_state=random_seed,
     )
-    loo_pit_img = _render_pc_to_img(pc)
-    pc = azp.plot_loo_pit(
-        idata, coverage=True, envelope_prob=ci_level, figure_kwargs={"figsize": (7, 4)}
-    )
-    loo_eti_img = _render_pc_to_img(pc)
+    # Two panels: LOO-PIT QQ plot (coverage=False) and LOO-PIT ETI coverage
+    # plot (coverage=True), both rendered to image arrays.
+    loo_pit_img, loo_eti_img = [
+        _render_pc_to_img(
+            _create_loo_pit_plot(
+                lpv_ds, coverage=coverage, ci_level=ci_level, figure_size=(7, 4)
+            )
+        )
+        for coverage in (False, True)
+    ]
 
     _, (ax_loo_1, ax_loo_2, ax_custom) = plt.subplots(1, 3, figsize=(14, 7))
 
@@ -3890,12 +4171,19 @@ def plot_loo_calibration_curves(
     ax_loo_2.imshow(loo_eti_img)
     ax_loo_2.axis("off")
 
-    y_obs, y_pred, log_lik_flat = _prepare_calibration_data(idata)
+    var_name = _resolve_likelihood_var_name(idata)
+    if var_name not in lpv_ds.data_vars:
+        raise ValueError(
+            f"Expected loo_pit dataset to contain {var_name!r} (matching the "
+            + f"observed variable), found {list(lpv_ds.data_vars)}."
+        )
+    loo_pit_da = None if custom_loo_pit else lpv_ds[var_name]
 
     fig, calib_res = plot_loo_calibration_curve_with_reference(
-        y_obs,
-        y_pred,
-        log_likelihood=log_lik_flat,
+        expected_coverage=expected_coverage,
+        idata=idata,
+        loo_pit_value=loo_pit_da,
+        weights=weights_3d_da,
         n_boot=n_boot,
         ci_level=ci_level,
         random_seed=random_seed,
@@ -3905,6 +4193,40 @@ def plot_loo_calibration_curves(
     plt.tight_layout()
     plt.show()
     return fig, calib_res
+
+
+def _resolve_likelihood_var_name(idata: DataTree) -> str:
+    """Resolve the single observed-variable name used across idata groups.
+
+    Returns the name of the only variable in idata.observed_data, which is
+    shared by the posterior_predictive and loo_pit outputs.
+
+    Args:
+        idata: DataTree whose observed_data must contain exactly one
+            variable.
+
+    Returns:
+        The name of the single observed variable.
+
+    Raises:
+        ValueError: If idata.observed_data does not contain exactly one
+            variable (multi-likelihood models must be handled explicitly
+            elsewhere -- this helper does not guess).
+
+    Example:
+        ```python
+        var_name = _resolve_likelihood_var_name(idata)
+        ```
+
+    """
+    obs_vars = list(idata.observed_data.data_vars)
+    if len(obs_vars) != 1:
+        raise ValueError(
+            "Expected exactly one observed variable in idata.observed_data, "
+            + f"found {obs_vars}. Multi-likelihood models are not supported "
+            + "here; resolve the variable explicitly."
+        )
+    return obs_vars[0]
 
 
 def evaluate_noise_model(

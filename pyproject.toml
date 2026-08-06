@@ -14,14 +14,17 @@ dependencies = [
   "jaxtyping>=0.3.10",
   "numpy",
   "nutpie",
+  "openpyxl>=3.1.5",
   "optuna",
   "pandas",
+  "patsy>=1.0.2",
   "plotly",
   "pymc>=6.0.0",
   "pytensor",
   "scikit-learn",
   "scipy",
   "seaborn",
+  "tqdm>=4.68.3",
 ]
 
 [dependency-groups]

@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>How Pareto-Smoothed Importance Weights Work</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.7;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem;
+            color: #333;
+            background-color: #fafafa;
+        }
+
+        h1 {
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 0.5rem;
+        }
+
+        h2 {
+            color: #34495e;
+            margin-top: 2rem;
+            border-left: 4px solid #3498db;
+            padding-left: 0.75rem;
+        }
+
+        h3 {
+            color: #555;
+        }
+
+        .math-block {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            margin: 1rem 0;
+            overflow-x: auto;
+        }
+
+        .key-result {
+            background: #e8f4f8;
+            border-left: 4px solid #2980b9;
+            padding: 1rem 1.5rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+
+        .warning {
+            background: #fef3e2;
+            border-left: 4px solid #f39c12;
+            padding: 1rem 1.5rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            background: white;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 0.75rem;
+            text-align: left;
+        }
+
+        th {
+            background: #3498db;
+            color: white;
+        }
+
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+
+        .formula {
+            font-family: 'Cambria Math', 'Times New Roman', serif;
+            font-style: italic;
+        }
+
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Consolas', monospace;
+        }
+
+        pre {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-family: 'Consolas', monospace;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+            color: inherit;
+        }
+
+        .section-intro {
+            font-size: 1.05rem;
+            color: #555;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #eee;
+            margin: 2rem 0;
+        }
+
+        .quick-ref {
+            background: #2c3e50;
+            color: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin: 1.5rem 0;
+        }
+
+        .quick-ref h3 {
+            color: #ecf0f1;
+            margin-top: 0;
+        }
+
+        .quick-ref table th {
+            background: #34495e;
+        }
+
+        .figure {
+            text-align: center;
+            margin: 1.5rem 0;
+        }
+
+        .figure img {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .figure figcaption {
+            font-size: 0.9rem;
+            color: #555;
+            margin-top: 0.5rem;
+            font-style: italic;
+        }
+    </style>
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']]
+            }
+        };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+
+<body>
+
+    <h1>How Pareto-Smoothed Importance Weights Work</h1>
+
+    <p class="section-intro">
+        This guide explains the mechanics behind the PSIS (Pareto-Smoothed Importance
+        Sampling) weights returned by <code>compute_psis_weights()</code>: what they
+        approximate, how they relate to the raw log-likelihood, the sign-inversion
+        gotcha of the ArviZ accessor, and why the weight-vs-log-likelihood curve
+        flattens at its left tail. It also contains the diagnostic snippet for
+        visualizing the relationship for a single observation.
+    </p>
+
+    <hr>
+
+    <h2>1. The Goal: LOO-CV Without Refitting</h2>
+
+    <p>
+        The Leave-One-Out predictive density $p(y_i \mid y_{-i})$ normally requires
+        refitting the model $n$ times, once per observation. PSIS approximates it
+        using a single posterior fit by reweighting the posterior draws:
+    </p>
+
+    <div class="math-block">
+        $$p(y_i \mid y_{-i}) \approx \frac{\sum_{s=1}^{S} w_{i,s} \; p(y_i \mid \theta_s)}{\sum_{s=1}^{S} w_{i,s}}$$
+    </div>
+
+    <p>
+        where $\theta_s$ are the posterior draws and the raw importance ratios are
+        inversely proportional to how well draw $s$ predicts observation $i$:
+    </p>
+
+    <div class="math-block">
+        $$w_{i,s}^{\text{raw}} = \frac{1}{p(y_i \mid \theta_s)} = \exp\left(-\log p(y_i \mid \theta_s)\right)$$
+    </div>
+
+    <p>
+        Draws that struggle to predict $y_i$ get large weights; draws that predict it
+        easily get small weights. This reweighting reconstructs the target LOO
+        distribution without any refit.
+    </p>
+
+    <hr>
+
+    <h2>2. Weight-to-Log-Likelihood Relationship</h2>
+
+    <p>
+        Because the weights are the reciprocal of the likelihood, they are strictly
+        <strong>negatively correlated</strong> with the raw log-likelihood across
+        posterior samples for any given observation:
+    </p>
+
+    <table>
+        <tr>
+            <th>Raw Log-Likelihood</th>
+            <th>Importance Weight</th>
+            <th>Interpretation</th>
+        </tr>
+        <tr>
+            <td>Low (poor fit)</td>
+            <td>High</td>
+            <td>Draw predicts the observation badly, so it must be upweighted</td>
+        </tr>
+        <tr>
+            <td>High (good fit)</td>
+            <td>Low</td>
+            <td>Draw predicts the observation well, so it is already well represented</td>
+        </tr>
+    </table>
+
+    <div class="key-result">
+        <strong>Key Insight:</strong> Plotting weight versus log-likelihood for one
+        observation shows an approximately exponential decay curve: as the raw
+        log-likelihood increases, the PSIS weight decreases.
+    </div>
+
+    <hr>
+
+    <h2>3. Sign-Inversion Gotcha</h2>
+
+    <div class="warning">
+        <strong>Critical:</strong> Always pass the RAW positive log-likelihood to
+        the ArviZ accessor. The wrapper negates it internally to build the log
+        importance ratios. Manually negating the input beforehand causes a
+        double-negation, inverting the math and breaking the PSIS algorithm.
+    </div>
+
+    <p>
+        The exploration snippet in Section 5 uses the xarray accessor
+        <code>.azstats.psislw()</code>. Do <em>not</em> multiply the input by $-1$
+        before the call; the accessor handles the sign internally.
+    </p>
+
+    <hr>
+
+    <h2>4. Why the Far-Left Tail Flattens</h2>
+
+    <p>
+        For some observations the leftmost points of the scatter (most negative
+        log-likelihood, i.e. the worst-fitting draws) do not blow up exponentially as
+        the raw formula predicts. This is expected, not a bug:
+    </p>
+
+    <ul>
+        <li>The left tail is exactly where the raw importance ratios are most extreme.</li>
+        <li>PSIS fits a generalized-Pareto distribution to this tail and replaces the extreme ratios with smoothed
+            values.</li>
+        <li>This deliberately pulls the extremes toward the bulk, reducing the variance of the LOO estimate.</li>
+    </ul>
+
+    <div class="key-result">
+        <strong>Key Insight:</strong> A slight flattening/clustering in the
+        upper-left region shows the Pareto correction is doing its job — it
+        prevents a couple of draws from dominating the weight sum.
+    </div>
+
+    <hr>
+
+    <h2>5. Exploration Snippet: Weight vs. Log-Likelihood</h2>
+
+    <p>
+        The snippet below is a diagnostic for a <em>single</em> observation. It was
+        moved out of the <code>compute_psis_weights()</code> docstring into this
+        guide, because it explores the PSIS mechanism itself rather than demonstrating
+        the function's API.
+    </p>
+
+    <pre><code>from arviz_stats.utils import get_log_likelihood
+            from arviz_stats.loo.helper_loo import _get_r_eff
+
+            r_eff = _get_r_eff(idata, n_samples)
+            log_likelihood_da = get_log_likelihood(idata)
+            obs_index = 0
+            single_obs_ll = log_likelihood_da.isel(obs=obs_index)
+            lw_da, khat = log_likelihood_da.azstats.psislw(r_eff=r_eff)
+            single_obs_w_da = np.exp(lw_da).isel(obs=obs_index)
+            khat_obs = khat.isel(obs=obs_index)
+
+            # or equivalently, straight from the LOO routine:
+            # from arviz_stats.loo.loo import loo
+            # elpd_data = loo(idata, pointwise=True)
+            # single_obs_w_da = np.exp(elpd_data.log_weights).isel(obs=obs_index)
+            # khat_obs = elpd_data.pareto_k.isel(obs=obs_index)
+
+            plt.scatter(
+            single_obs_ll.to_numpy().flatten(),
+            single_obs_w_da.to_numpy().flatten(),
+            )
+            plt.title(
+            "PSIS weight versus log-likelihood for a single observation\n"
+            f"with pareto-k of {float(khat_obs):.3f}"
+            )</code></pre>
+
+    <p>
+        Notes on the snippet:
+    </p>
+    <ul>
+        <li><code>obs</code> is the observation dimension name of the
+            log-likelihood group; substitute the actual name if yours differs.</li>
+        <li><code>float(khat.isel(...))</code> is required: f-string
+            <code>:.3f</code> formatting cannot format a raw numpy array or
+            xarray scalar.
+        </li>
+        <li>Plotting all observations at once produces a solid blob; slice to a
+            single observation as shown to see the decay curve clearly.</li>
+    </ul>
+
+    <figure class="figure">
+        <img src="psis_vs_ll.png" alt="PSIS weight versus log-likelihood scatter for a single observation">
+        <figcaption>
+            PSIS importance weight versus raw log-likelihood for a single
+            observation. The exponential decay (high weight for poor-fitting
+            draws, low weight for good fits) confirms the reciprocal-likelihood
+            relationship, while the flattened upper-left tail shows the
+            generalized-Pareto smoothing at work.
+        </figcaption>
+    </figure>
+
+    <hr>
+
+    <h2>6. Interpreting the Scatter</h2>
+
+    <table>
+        <tr>
+            <th>Region</th>
+            <th>What It Shows</th>
+        </tr>
+        <tr>
+            <td>Lower-right (high LL, low weight)</td>
+            <td>Well-predicted draws; contribute little to the LOO estimate</td>
+        </tr>
+        <tr>
+            <td>Upper-left (low LL, high weight)</td>
+            <td>Poorly-predicted draws; carry the LOO information</td>
+        </tr>
+        <tr>
+            <td>Flattened left tail</td>
+            <td>Generalized-Pareto smoothing pulling in extreme ratios</td>
+        </tr>
+    </table>
+
+    <hr>
+
+    <h2>7. Pareto $k$ Diagnostics</h2>
+
+    <p>
+        The reliability of the PSIS approximation for each observation is summarized
+        by its Pareto shape parameter $k$:
+    </p>
+
+    <table>
+        <tr>
+            <th>Range</th>
+            <th>Status</th>
+            <th>Interpretation</th>
+        </tr>
+        <tr>
+            <td>$k \leq 0.70$</td>
+            <td>Good</td>
+            <td>Smoothed weights reliable; LOO estimate trustworthy</td>
+        </tr>
+        <tr>
+            <td>$0.70 &lt; k \leq 1.00$</td>
+            <td>Bad</td>
+            <td>Potentially influential point; investigate the observation</td>
+        </tr>
+        <tr>
+            <td>$k &gt; 1.00$</td>
+            <td>Very Bad</td>
+            <td>Finite variance not guaranteed; LOO unreliable for this point</td>
+        </tr>
+    </table>
+
+    <div class="warning">
+        <strong>Note:</strong> $k$ is sensitive to MCMC sampling variability — a
+        single run can cross the 0.7 threshold randomly. Prefer inspecting the
+        distribution of $k$ values over one run rather than asserting on a single
+        value.
+    </div>
+
+    <hr>
+
+    <div class="quick-ref">
+        <h3>Quick Reference Card</h3>
+
+        <p><strong>Raw ratio:</strong> $w_{i,s}^{\text{raw}} = \exp(-\log p(y_i \mid \theta_s))$</p>
+
+        <p><strong>Smoothed weight:</strong> $w_{i,s} = $ Pareto-smoothed, normalized $\exp(\text{lw})$</p>
+
+        <p><strong>Sign convention:</strong> Pass the RAW positive log-likelihood; ArviZ negates internally</p>
+
+        <p><strong>Curve shape:</strong> Exponential decay; flattened left tail = Pareto smoothing at work</p>
+
+        <p><strong>Threshold:</strong> $k \leq 0.70$ reliable; inspect per-observation $k$ array</p>
+    </div>
+
+    <hr>
+
+    <h2>8. Conclusion</h2>
+
+    <p>
+        PSIS weights approximate the LOO posterior by upweighting posterior draws that
+        predict each observation poorly, with the raw ratios computed from the
+        reciprocal likelihood and then stabilized by generalized-Pareto tail
+        smoothing. The weight-vs-log-likelihood curve is therefore an exponential
+        decay with a deliberately flattened worst-fit tail, and the Pareto-$k$
+        diagnostic tells you how trustworthy the approximation is for each
+        observation.
+    </p>
+
+    <p>
+        For the function's API, see <code>compute_psis_weights()</code> in
+        <code>src/compressor_fouling_modeling/utility.py</code>.
+    </p>
+
+</body>
+
+</html>

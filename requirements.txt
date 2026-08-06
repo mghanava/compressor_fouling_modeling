@@ -48,6 +48,8 @@ decorator==5.3.1
     # via ipython
 donfig==0.8.1.post1
     # via zarr
+et-xmlfile==2.0.0
+    # via openpyxl
 etuples==0.3.10
     # via
     #   minikanren
@@ -148,6 +150,7 @@ numpy==2.4.6
     #   numcodecs
     #   optuna
     #   pandas
+    #   patsy
     #   pymc
     #   pytensor
     #   scikit-learn
@@ -160,6 +163,8 @@ nutpie==0.16.10
     # via compressor-fouling-modeling (pyproject.toml)
 obstore==0.10.1
     # via nutpie
+openpyxl==3.1.5
+    # via compressor-fouling-modeling (pyproject.toml)
 opt-einsum==3.4.0
     # via jax
 optuna==4.9.0
@@ -182,6 +187,8 @@ pandas==3.0.3
     #   xarray
 parso==0.8.7
     # via jedi
+patsy==1.0.2
+    # via compressor-fouling-modeling (pyproject.toml)
 pexpect==4.9.0
     # via ipython
 pillow==12.2.0
@@ -271,7 +278,9 @@ tornado==6.5.7
     #   ipykernel
     #   jupyter-client
 tqdm==4.68.3
-    # via optuna
+    # via
+    #   compressor-fouling-modeling (pyproject.toml)
+    #   optuna
 traitlets==5.15.1
     # via
     #   ipykernel

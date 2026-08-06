@@ -7,6 +7,11 @@ wheels/
 *.egg-info
 .python-version
 
+# Generated plots and images
+docs/*.png
+docs/*.jpg
+docs/*.jpeg
+
 # Virtual environments
 .venv
 
