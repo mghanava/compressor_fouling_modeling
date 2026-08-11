@@ -296,7 +296,8 @@
         the function's API.
     </p>
 
-    <pre><code>from arviz_stats.utils import get_log_likelihood
+    <pre><code>
+            from arviz_stats.utils import get_log_likelihood
             from arviz_stats.loo.helper_loo import _get_r_eff
 
             r_eff = _get_r_eff(idata, n_samples)
@@ -317,10 +318,11 @@
             single_obs_ll.to_numpy().flatten(),
             single_obs_w_da.to_numpy().flatten(),
             )
+
             plt.title(
             "PSIS weight versus log-likelihood for a single observation\n"
-            f"with pareto-k of {float(khat_obs):.3f}"
-            )</code></pre>
+            f"with pareto-k of {float(khat_obs):.3f}")
+        </code></pre>
 
     <p>
         Notes on the snippet:
