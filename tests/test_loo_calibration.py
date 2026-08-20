@@ -19,6 +19,12 @@ Five tiers of tests:
    specified, LOO-PIT must be approximately Uniform(0,1) and the calibration
    curve must lie on the diagonal.  This is the gold-standard positive test.
 
+2b. **Custom vs. ArviZ LOO-PIT parity** - on the same oracle fit and PSIS
+   weights, ``compute_loo_pit_model_agnostic`` must agree pointwise with
+   the reference ``loo_pit`` from arviz_stats (shape, values, correlation,
+   and sorted order), guarding against regressions in either the custom
+   implementation or the weight extraction.
+
 3. **Deliberately miscalibrated PyMC models** - fit a model that is *wrong*
    (e.g. variance too small, wrong likelihood family, biased prior).
    These are negative tests: the diagnostic *must* detect miscalibration.
@@ -43,6 +49,7 @@ import unittest
 
 from arviz_base import extract, from_dict
 import arviz_plots as azp
+from arviz_stats.loo import loo_pit
 import matplotlib as mpl
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
@@ -207,7 +214,7 @@ def _fit_oracle_normal(
 
 def _extract_pred_and_weights(
     idata: DataTree,
-) -> tuple[DataArray, DataArray]:
+) -> tuple[DataArray, DataArray, DataArray, DataArray]:
     """
     Pull posterior-predictive draws and PSIS-LOO importance weights out of
     an ArviZ InferenceData object.
@@ -221,9 +228,9 @@ def _extract_pred_and_weights(
         DataArray, extract(idata, group="posterior_predictive", combined=False)
     )  # (chain, draw, obs)
 
-    weights = compute_psis_weights(idata)[2]
+    lw_da, pareto_k, weights, _ = compute_psis_weights(idata)
 
-    return y_pred, weights
+    return y_pred, lw_da, pareto_k, weights
 
 
 # ============================================================================
@@ -831,7 +838,7 @@ class TestOracleNormalModel:
     def oracle_data(self) -> OracleData:
         """Fit once per test method."""
         idata, y_obs = _fit_oracle_normal()
-        y_pred, weights = _extract_pred_and_weights(idata)
+        y_pred, _, _, weights = _extract_pred_and_weights(idata)
         pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
         return {"pit": pit, "weights": weights}
 
@@ -913,6 +920,80 @@ class TestOracleNormalModel:
 
 
 # ============================================================================
+# Tier 2b: Custom LOO-PIT implementation vs ArviZ reference (parity tests)
+# ============================================================================
+
+
+@pytest.mark.slow  # mark so CI can skip long tests with -m "not slow"
+class TestCustomPitMatchesArviz:
+    """
+    Parity tests: compute_loo_pit_model_agnostic must agree with the
+    reference ``loo_pit`` from arviz_stats when both receive the same
+    fitted model, observed data, and PSIS-LOO importance weights.
+
+    Both implementations estimate PIT_i = sum_s w_i^(s) * 1{y_i^(s) <= y_i}
+    as a PSIS-weighted empirical CDF, so they must agree to numerical
+    precision; any systematic disagreement indicates a bug in the custom
+    function or in how weights are extracted.
+    """
+
+    @pytest.fixture
+    def pit_pair(self) -> tuple[DataArray, DataArray]:
+        """Return (custom_pit, arviz_pit) computed on the same oracle fit.
+
+        Fits the oracle normal model once, extracts the PSIS-LOO weights
+        and posterior predictive draws, then computes LOO-PIT values via
+        both the custom model-agnostic function and the ArviZ reference.
+        """
+        idata, y_obs = _fit_oracle_normal()
+        y_pred, lw_da, pareto_k, weights = _extract_pred_and_weights(idata)
+
+        custom_pit = compute_loo_pit_model_agnostic(y_obs, y_pred, weights)
+
+        lpv_az = loo_pit(
+            idata,
+            log_weights=lw_da.to_dataset(),
+            pareto_k=pareto_k.to_dataset(),
+            random_state=np.random.default_rng(RNG_SEED),
+        )
+        var_name = _resolve_likelihood_var_name(idata)
+        arviz_pit = lpv_az[var_name]
+
+        return custom_pit, arviz_pit
+
+    def test_shapes_match(self, pit_pair: tuple[DataArray, DataArray]):
+        """Both implementations return one PIT value per observation."""
+        custom_pit, arviz_pit = pit_pair
+        assert custom_pit.shape == arviz_pit.shape, (
+            f"Custom PIT shape {custom_pit.shape} != ArviZ shape {arviz_pit.shape}"
+        )
+
+    def test_values_close_pointwise(self, pit_pair: tuple[DataArray, DataArray]):
+        """Pointwise agreement between the two implementations."""
+        custom_pit, arviz_pit = pit_pair
+        assert np.allclose(custom_pit, arviz_pit, atol=1e-3), (
+            "Custom PIT deviates from ArviZ pointwise; max abs diff "
+            f"{np.abs(custom_pit - arviz_pit).max():.2e}"
+        )
+
+    def test_high_correlation(self, pit_pair: tuple[DataArray, DataArray]):
+        """Correlation between the two implementations must be near-perfect."""
+        custom_pit, arviz_pit = pit_pair
+        corr = np.corrcoef(custom_pit, arviz_pit)[0, 1]
+        assert corr > 0.9999, (
+            f"Correlation {corr:.6f} < 0.9999 — implementations disagree"
+        )
+
+    def test_sorted_values_close(self, pit_pair: tuple[DataArray, DataArray]):
+        """Sorted PIT values agree, ruling out a pure reordering artifact."""
+        custom_pit, arviz_pit = pit_pair
+        max_abs_diff = np.abs(np.sort(custom_pit) - np.sort(arviz_pit)).max()
+        assert max_abs_diff < 1e-3, (
+            f"Sorted PIT values differ by up to {max_abs_diff:.2e}"
+        )
+
+
+# ============================================================================
 # Tier 3: Deliberately miscalibrated PyMC models (negative tests)
 # ============================================================================
 @pytest.mark.slow
@@ -941,7 +1022,7 @@ class TestMiscalibratedModels:
         """Fit model_fn on y_obs, return PIT values."""
         idata = model_fn(y_obs)
         var_name = _resolve_likelihood_var_name(idata)
-        y_pred, weights = _extract_pred_and_weights(idata)
+        y_pred, _, _, weights = _extract_pred_and_weights(idata)
         return compute_loo_pit_model_agnostic(
             idata.observed_data[var_name], y_pred, weights
         )
