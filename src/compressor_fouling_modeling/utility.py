@@ -3739,6 +3739,11 @@ def _resolve_calibration_inputs(
         raise ValueError(
             f"weights must have dimensions {expected_w_dims}, got {weights.dims}."
         )
+    weight_sums = weights.sum(("chain", "draw"))
+    assert np.allclose(weight_sums, 1.0), (
+        f"PSIS weights do not sum to 1: "
+        f"min={weight_sums.min().item():.6g}, max={weight_sums.max().item():.6g}"
+    )
     return y_obs, y_pred, weights
 
 
