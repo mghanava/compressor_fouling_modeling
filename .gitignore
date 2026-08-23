@@ -27,3 +27,7 @@ uv.lock
 
 # OS
 .DS_Store
+
+# Calibration simulation outputs (generated per-run, not tracked)
+calibration_simulations/diagnostics/
+calibration_simulations/simulation_results/

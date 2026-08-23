@@ -65,6 +65,7 @@ The project explores two complementary approaches:
 - Bayesian R², MAE, RMSE, LOO-adjusted metrics
 - Posterior predictive checks (ECDF, KDE, Q-Q plots)
 - Variance decomposition and per-setpoint noise evaluation
+- **Calibration simulations** — LOO-PIT uniformity testing per the paper (arXiv:2603.02928)
 
 ### Pressure Regime Modeling
 - PyMC Gaussian mixture model for identifying distinct operating regimes
@@ -110,7 +111,9 @@ data/raw/ds_compressor_data.csv
   LOO-PIT calibration curves
   Posterior predictive checks
   Model comparison (ELPD)
-```
+  │
+  └──► [Calibration Simulations]
+      LOO-PIT uniformity testing per arXiv:2603.02928
 
 ---
 
@@ -159,6 +162,13 @@ source .venv/bin/activate
 │   ├── compressor_fouling_no_uncertanity.ipynb     # Frequentist ML pipeline
 │   ├── compressor_fouling_with_uncertanity.ipynb   # Bayesian pipeline
 │   └── compressor_pressure_regimes_mixture_model.ipynb # Gaussian mixture model
+├── calibration_simulations/            # LOO-PIT predictive model checking
+│   ├── __init__.py
+│   ├── generate_data.py                # Data-generating process (DGP)
+│   ├── utility.py                      # UniformityStats / LpvStats dataclasses and compute_loo_pit_uniformity_stats()
+│   ├── fit_model.py                    # Simulation pipeline (run_one_simulation, diagnose_model, etc.)
+│   ├── diagnostics/                    # Generated diagnostic plots per simulation
+│   └── simulation_results/             # Collected simulation metrics
 ├── results/                           # Generated plots & figures
 ├── src/
 │   └── compressor_fouling_modeling/
@@ -256,6 +266,10 @@ The models produce two key diagnostic plots:
 
 - **`results/fouling_summary.png`** — Frequentist 3-panel: actual vs predicted outlet pressure, residuals, and CUSUM with detected fouling onset.
 - **`results/fouling_summary_probabilistic.png`** — Bayesian 4-panel: CUSUM paths across posterior draws, exceedance probabilities, residuals with uncertainty bands.
+
+### Calibration Simulations
+
+Preliminary finding: the custom calibration check is not guaranteed to work when PSIS weights are correlated. This requires further investigation.
 
 ---
 
